@@ -45,7 +45,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-import coinespy as cpy
+try:
+    import coinespy as cpy
+except ImportError:
+    sys.stderr.write(
+        "ERROR: the `coinespy` package is not installed.\n"
+        "       Install dependencies with:  pip install -r requirements.txt\n"
+    )
+    sys.exit(2)
 
 from bmeconfig_to_profile import convert as parse_bmeconfig
 
@@ -748,6 +755,11 @@ def main() -> int:
     ap.add_argument("--config", type=Path, default=None,
                     help="BME AI-Studio .bmeconfig. Default: newest in "
                          "current directory.")
+    ap.add_argument("--check", action="store_true",
+                    help="Hardware check only: open the board, init all 8 "
+                         "sensors, print a summary, then exit. No CSV is "
+                         "written. Use this to verify wiring/firmware "
+                         "before running a real capture.")
     args = ap.parse_args()
 
     config_path = args.config if args.config is not None else find_bmeconfig()
@@ -789,11 +801,27 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _stop)
 
     board = cpy.CoinesBoard()
-    board.open_comm_interface(cpy.CommInterface.USB)
+    try:
+        board.open_comm_interface(cpy.CommInterface.USB)
+    except Exception as exc:
+        sys.stderr.write(
+            f"ERROR: could not open the Application Board over USB: {exc}\n"
+            "       Check that:\n"
+            "         - the board is plugged in with a data-capable USB cable\n"
+            "         - no other program is using the COM port "
+            "(BME AI-Studio, an existing receiver, a serial terminal…)\n"
+            "         - coines-bridge firmware is flashed on the board\n"
+        )
+        return 1
     try:
         info = board.get_board_info()
         print(f"# board hw=0x{info.HardwareId:X} sw=0x{info.SoftwareId:X} "
               f"shuttle=0x{info.ShuttleID:X}", file=sys.stderr)
+        if info.ShuttleID != 0x57:
+            print(f"# WARN: shuttle ID 0x{info.ShuttleID:X} is not 0x57 "
+                  "(BME690 8x). The CS-pin map in SENSOR_CS_PINS is for the "
+                  "8x shuttle — other shuttles may behave differently.",
+                  file=sys.stderr)
 
         # Power-cycle for a known start state.
         board.set_shuttleboard_vdd_vddio_config(0, 0)
@@ -819,6 +847,21 @@ def main() -> int:
         if not sensors:
             print("# no sensors initialised — aborting", file=sys.stderr)
             return 1
+
+        if args.check:
+            print()
+            print(f"--check summary: {len(sensors)} / {len(SENSOR_CS_PINS)} "
+                  f"sensors initialised successfully.")
+            print(f"  responding: {[s.index for s in sensors]}")
+            missing = [i for i in range(len(SENSOR_CS_PINS))
+                       if i not in [s.index for s in sensors]]
+            if missing:
+                print(f"  no chip ID:  {missing}  "
+                      "(faulty solder / dead die / wrong shuttle)")
+            print(f"  CSV would be: {out_path}  (not written in --check mode)")
+            print()
+            print("Looks good. Run again without --check to start capturing.")
+            return 0
 
         with out_path.open("w", newline="", encoding="utf-8") as csv_file:
             csv_writer = csv.writer(csv_file)
