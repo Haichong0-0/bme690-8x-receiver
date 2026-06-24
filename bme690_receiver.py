@@ -143,6 +143,18 @@ class Calib:
 
 
 @dataclass
+class SensorPlan:
+    """Everything from the bmeconfig that's specific to one sensor."""
+    profile: "ProfileInfo"
+    scan_n: int     # numberScanningCycles
+    sleep_n: int    # numberSleepingCycles (0 = continuous, never sleep)
+
+    @property
+    def continuous(self) -> bool:
+        return self.sleep_n == 0
+
+
+@dataclass
 class SensorState:
     cs_pin: int
     index: int
@@ -155,10 +167,19 @@ class SensorState:
     last_meas_index: Optional[int] = None
     last_step: Optional[int] = None
     profile_runs: int = 0
-    # Per-sensor heater profile. Different sensors can run different
-    # profiles in BME AI-Studio's grouped layout (e.g., even sensors
-    # stabilising while odd sensors gas-scan).
-    profile: Optional["ProfileInfo"] = None
+    # Per-sensor heater profile + duty cycle bundle. Each sensor runs
+    # independently — its own profile, its own scan/sleep phase clock.
+    plan: Optional[SensorPlan] = None
+    # Phase state machine: "scan" while parallel mode is armed and we're
+    # polling for rows, "sleep" while disarmed and waiting out the duty
+    # cycle's sleep window. Continuous sensors stay in "scan" forever.
+    phase: str = "scan"
+    phase_end_time: Optional[float] = None    # monotonic clock; None = never expires
+    scanning_cycle_index: int = 1             # monotonic across phases, written to CSV
+
+    @property
+    def profile(self) -> Optional["ProfileInfo"]:
+        return self.plan.profile if self.plan else None
 
 
 @dataclass
@@ -412,8 +433,13 @@ def arm_parallel(board, s: SensorState, prof: "ProfileInfo",
               calc_gas_wait(prof.gas_wait_shared_ms))
 
     spi_write(board, s.cs_pin, REG_CTRL_GAS_0, 0x00)   # heater enabled
+    # nb_conv = profile_len (number of conversions per cycle), matching
+    # bme69x.c::set_conf for parallel mode. Subtracting one here would
+    # cause the chip to skip the final slot — confirmed empirically: with
+    # nb_conv = n_steps - 1, step 9 of a 10-step profile is never observed
+    # in any FIELD's gas_meas_index.
     spi_write(board, s.cs_pin, REG_CTRL_GAS_1,
-              RUN_GAS_ON | ((prof.n_steps - 1) & NB_CONV_MSK))
+              RUN_GAS_ON | (prof.n_steps & NB_CONV_MSK))
 
     # Flip to PARALLEL — chip starts cycling the heater profile autonomously.
     cur = spi_read(board, s.cs_pin, REG_CTRL_MEAS, 1)[0]
@@ -496,7 +522,7 @@ def poll_once(board, sensors: List[SensorState],
     rtc = int(time.time())
 
     for s in sensors:
-        if s.disabled:
+        if s.disabled or s.phase != "scan":
             continue
         try:
             buf = spi_read(board, s.cs_pin, REG_FIELD0, LEN_ALL_FIELDS)
@@ -530,10 +556,21 @@ def poll_once(board, sensors: List[SensorState],
         now_iso = datetime.now().isoformat(timespec="milliseconds")
         ts_now_ms = int(time.monotonic() * 1000) - t_poweron_ms
 
-        # Per-sensor wall-time-derived scanning_cycle_index.
+        # scanning_cycle_index is bumped per scan phase by _enter_sleep;
+        # within an active scan phase, derive the running cycle from how
+        # much of the scan window has elapsed so far.
         prof = s.profile
-        elapsed_s = ts_now_ms / 1000.0
-        cycle_idx = int(elapsed_s / (prof.cycle_ms / 1000.0)) + 1 if prof else 1
+        if prof is None:
+            cycle_idx = s.scanning_cycle_index
+        else:
+            if s.plan and not s.plan.continuous and s.phase_end_time is not None:
+                phase_start = s.phase_end_time - s.plan.scan_n * prof.cycle_ms / 1000.0
+                elapsed_in_phase = max(0.0, time.monotonic() - phase_start)
+            else:
+                # Continuous sensors: count from receiver start.
+                elapsed_in_phase = ts_now_ms / 1000.0
+            cycle_idx = (s.scanning_cycle_index
+                         + int(elapsed_in_phase / (prof.cycle_ms / 1000.0)))
 
         for meas_index, off in fresh:
             d = decode_field(buf, off, s.calib)
@@ -567,122 +604,134 @@ def poll_once(board, sensors: List[SensorState],
     return rows_emitted
 
 
+def _enter_scan(board, s: SensorState) -> None:
+    """Arm parallel mode on a sensor and set up its scan-phase clock."""
+    arm_parallel(board, s, s.plan.profile)
+    s.phase = "scan"
+    if s.plan.continuous:
+        s.phase_end_time = None
+    else:
+        s.phase_end_time = time.monotonic() + s.plan.scan_n * s.plan.profile.cycle_ms / 1000.0
+
+
+def _enter_sleep(board, s: SensorState) -> None:
+    """Disarm parallel mode and set up its sleep-phase clock. Bumps the
+    sensor's scanning_cycle_index by the scan_n we just completed."""
+    disarm(board, s)
+    s.phase = "sleep"
+    s.scanning_cycle_index += s.plan.scan_n
+    s.phase_end_time = time.monotonic() + s.plan.sleep_n * s.plan.profile.cycle_ms / 1000.0
+    # Reset per-cycle chip-tracking state so the next scan starts clean.
+    s.last_meas_index = None
+    s.last_step = None
+
+
 def stream(board, sensors: List[SensorState],
-           scan_n: int, sleep_n: int, csv_writer, csv_file) -> None:
-    n_live = sum(1 for s in sensors if not s.disabled)
-    # Each sensor can have its own profile (BME AI-Studio grouped layout).
-    by_prof: dict = {}
-    for s in sensors:
-        if s.disabled or s.profile is None:
-            continue
-        by_prof.setdefault(id(s.profile), (s.profile, [])) [1].append(s.index)
-    print(f"# streaming {n_live} sensor(s); duty {scan_n}/{sleep_n} "
-          f"({'continuous' if sleep_n == 0 else 'scan/sleep'})",
-          file=sys.stderr)
-    for _, (prof, idxs) in by_prof.items():
-        print(f"#   sensors {idxs}: {prof.n_steps}-step profile, "
-              f"cycle ≈ {prof.cycle_ms/1000:.2f} s, "
-              f"shared_dur={prof.gas_wait_shared_ms} ms", file=sys.stderr)
+           csv_writer, csv_file) -> None:
+    """Per-sensor independent scan/sleep state machines on a shared
+    polling loop. Each sensor uses its own heater profile, its own
+    duty cycle (scan_n / sleep_n), and progresses through its own
+    phases. Continuous sensors (sleep_n=0) never enter the sleep phase
+    and just keep streaming.
+
+    The polling rate is set to the FASTEST sensor's expected sample
+    interval so no sample gets overwritten in the chip's 3-field
+    rotation; slower sensors are simply polled more often than they
+    need (which is fine — duplicates are skipped by `modular_newer`)."""
+    live = [s for s in sensors if not s.disabled and s.plan is not None]
+    if not live:
+        print("# no usable sensors; aborting", file=sys.stderr)
+        return
+
+    print(f"# streaming {len(live)} sensor(s)", file=sys.stderr)
+    # Group sensors by (profile_id, plan) for a concise startup summary.
+    summary: dict = {}
+    for s in live:
+        key = (id(s.plan.profile), s.plan.scan_n, s.plan.sleep_n)
+        summary.setdefault(key, (s.plan, []))[1].append(s.index)
+    for (plan, idxs) in summary.values():
+        duty_str = (f"continuous"
+                    if plan.continuous
+                    else f"{plan.scan_n} scan / {plan.sleep_n} sleep")
+        print(f"#   sensors {idxs}: {plan.profile.n_steps}-step profile, "
+              f"cycle ≈ {plan.profile.cycle_ms/1000:.2f} s, duty {duty_str}",
+              file=sys.stderr)
 
     t_poweron_ms = int(time.monotonic() * 1000)
 
-    # Poll period = ~meas_dur + shared_dur. The shared_dur differs per sensor
-    # in a grouped layout; pick the smallest so we don't undersample the
-    # fast group.
-    min_shared = min(s.profile.gas_wait_shared_ms for s in sensors
-                     if s.profile is not None)
+    # Poll rate keyed off the fastest sensor's expected sample interval.
+    min_shared = min(s.plan.profile.gas_wait_shared_ms for s in live)
     poll_period_s = (parallel_meas_dur_us() / 1e6) + (min_shared / 1000.0)
 
-    # Reference cycle for duty-cycle timing. Use the LONGEST per-sensor
-    # cycle so "scan_n cycles" means everyone gets at least scan_n profile
-    # runs. For RDC-1-0 continuous, sleep_n=0 and we never sleep.
-    max_cycle_ms = max(s.profile.cycle_ms for s in sensors
-                       if s.profile is not None)
+    # Initial: arm every live sensor, enter scan phase.
+    for s in live:
+        try:
+            _enter_scan(board, s)
+        except Exception as exc:
+            print(f"# s{s.index} initial arm failed: {exc}", file=sys.stderr)
+            s.consecutive_errors += 1
+            if s.consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                s.disabled = True
+
+    last_progress = time.monotonic()
+    total_rows = 0
+    steps_seen: dict = {s.index: set() for s in sensors}
 
     while _KEEP_RUNNING:
-        # ----- Arm parallel mode on every live sensor --------------------
+        time.sleep(poll_period_s)
+        now = time.monotonic()
+
+        # ---- Phase transitions per sensor -------------------------------
         for s in sensors:
-            if s.disabled or s.profile is None:
+            if s.disabled or s.plan is None:
                 continue
-            try:
-                arm_parallel(board, s, s.profile)
-            except Exception as exc:
-                print(f"# s{s.index} arm failed: {exc}", file=sys.stderr)
-                s.consecutive_errors += 1
-                if s.consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                    s.disabled = True
+            if s.phase == "scan" and s.phase_end_time is not None and now >= s.phase_end_time:
+                try:
+                    _enter_sleep(board, s)
+                except Exception as exc:
+                    print(f"# s{s.index} disarm failed: {exc}", file=sys.stderr)
+            elif s.phase == "sleep" and s.phase_end_time is not None and now >= s.phase_end_time:
+                try:
+                    _enter_scan(board, s)
+                    print(f"# s{s.index} re-armed; "
+                          f"cycle_index now {s.scanning_cycle_index}",
+                          file=sys.stderr)
+                except Exception as exc:
+                    print(f"# s{s.index} re-arm failed: {exc}", file=sys.stderr)
+                    s.consecutive_errors += 1
+                    if s.consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                        s.disabled = True
 
-        ref = next((s for s in sensors if not s.disabled), None)
-        if ref is None:
-            print("# no live sensors; aborting", file=sys.stderr)
-            break
+        # ---- Poll all sensors currently in scan phase -------------------
+        total_rows += poll_once(board, sensors, t_poweron_ms,
+                                csv_writer, csv_file)
+        for s in sensors:
+            if s.last_step is not None:
+                steps_seen[s.index].add(s.last_step)
 
-        t_scan_start = time.monotonic()
-        rows_in_scan = 0
-        polls = 0
-        last_progress = t_scan_start
-        steps_seen: dict = {s.index: set() for s in sensors}
-
-        if sleep_n == 0:
-            print(f"# scan starting (continuous, Ctrl+C to stop)",
-                  file=sys.stderr)
-            t_scan_end = float("inf")
-        else:
-            scan_dur_s = scan_n * max_cycle_ms / 1000.0
-            t_scan_end = t_scan_start + scan_dur_s
-            print(f"# scan starting: {scan_n} cycle(s) × "
-                  f"{max_cycle_ms/1000:.2f}s = ~{scan_dur_s:.1f}s",
-                  file=sys.stderr)
-
-        while _KEEP_RUNNING and time.monotonic() < t_scan_end:
-            time.sleep(poll_period_s)
-            polls += 1
-            rows_in_scan += poll_once(board, sensors, t_poweron_ms,
-                                      csv_writer, csv_file)
+        # ---- Periodic progress to stderr --------------------------------
+        if now - last_progress >= 2.0:
+            phase_strs = []
             for s in sensors:
-                if s.last_step is not None:
-                    steps_seen[s.index].add(s.last_step)
-            now = time.monotonic()
-            if now - last_progress >= 2.0:
-                if sleep_n == 0:
-                    pct_str = f"{int(now - t_scan_start)}s"
-                else:
-                    pct = min(100, int(100 * (now - t_scan_start)
-                                       / (scan_n * max_cycle_ms / 1000.0)))
-                    pct_str = f"{pct}%"
-                # Per-sensor step coverage so the fast/slow groups are both
-                # visible at a glance.
-                coverage = "  ".join(
-                    f"s{s.index}:{sorted(steps_seen[s.index])}"
-                    for s in sensors if not s.disabled)
-                print(f"  …{polls} polls, {rows_in_scan} valid rows  "
-                      f"[{pct_str}]\n"
-                      f"    {coverage}",
-                      file=sys.stderr)
-                last_progress = now
-
-        if not _KEEP_RUNNING:
-            break
-
-        elapsed = time.monotonic() - t_scan_start
-        live_now = [s.index for s in sensors if not s.disabled]
-        print(f"{datetime.now().strftime('%H:%M:%S')}  scan complete: "
-              f"{rows_in_scan} rows in {elapsed:.1f} s "
-              f"({rows_in_scan/max(elapsed, 1e-9):.1f} r/s)  "
-              f"sensors={live_now}")
-        sys.stdout.flush()
-
-        # Sleep phase only applies if sleep_n > 0.
-        if sleep_n > 0 and _KEEP_RUNNING:
-            for s in sensors:
-                if not s.disabled:
-                    disarm(board, s)
-            sleep_dur = (max_cycle_ms / 1000.0) * sleep_n
-            print(f"# sleeping {sleep_dur:.1f} s ({sleep_n} cycles)",
+                if s.disabled:
+                    continue
+                tag = ("scan" if s.phase == "scan"
+                       else f"sleep({int(s.phase_end_time - now) if s.phase_end_time else '∞'}s)")
+                phase_strs.append(
+                    f"s{s.index}:{tag}/cy{s.scanning_cycle_index}/"
+                    f"steps{sorted(steps_seen[s.index])}")
+            print(f"  …{total_rows} rows total\n"
+                  f"    {'  '.join(phase_strs)}",
                   file=sys.stderr)
-            t_end = time.monotonic() + sleep_dur
-            while _KEEP_RUNNING and time.monotonic() < t_end:
-                time.sleep(min(0.5, t_end - time.monotonic()))
+            last_progress = now
+
+    # ---- Cleanup on exit --------------------------------------------------
+    for s in sensors:
+        try:
+            disarm(board, s)
+        except Exception:
+            pass
+    print(f"# stopped — {total_rows} rows total", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -704,31 +753,49 @@ def _profile_from_raw(raw: dict) -> ProfileInfo:
 
 def load_profile(config_path: Path):
     """Read a .bmeconfig and return:
-      - profiles_by_sensor: {sensor_index: ProfileInfo} for every sensor
-        the config mentions (the BME AI-Studio "grouped" layout lets
-        different sensors run different heater profiles)
-      - duty_cycle: (scan_n, sleep_n) — taken from the first sensor's
-        dutyCycleProfile (all sensors share one in practice)
+      - plans_by_sensor: {sensor_index: SensorPlan} — each sensor's heater
+        profile AND its duty cycle, looked up independently from the
+        config's sensorConfigurations / dutyCycleProfiles. Different
+        sensors can have different heaters AND different duty cycles.
       - cfg: the full parsed config (for printing)"""
     cfg = parse_bmeconfig(config_path, divisor=1.0, profile_index=0)
-    by_id = {hp["id"]: _profile_from_raw(hp) for hp in cfg["heater_profiles"]}
+    heaters_by_id = {hp["id"]: _profile_from_raw(hp)
+                     for hp in cfg["heater_profiles"]}
+    duties_by_id = {dp["id"]: (dp["scan"], dp["sleep"])
+                    for dp in cfg["duty_cycle_profiles"]}
 
-    profiles_by_sensor: dict[int, ProfileInfo] = {}
+    plans_by_sensor: dict = {}
     for sc in cfg["sensor_configs"]:
-        prof = by_id.get(sc["heater_id"])
+        prof = heaters_by_id.get(sc["heater_id"])
         if prof is None:
             print(f"# WARN: sensor {sc['sensor_index']} references unknown "
                   f"heater '{sc['heater_id']}', skipping", file=sys.stderr)
             continue
-        profiles_by_sensor[sc["sensor_index"]] = prof
+        duty = duties_by_id.get(sc["duty_id"])
+        if duty is None:
+            # Fall back to a permissive default if a sensor's duty profile
+            # is missing — better than dropping the sensor entirely.
+            print(f"# WARN: sensor {sc['sensor_index']} references unknown "
+                  f"duty '{sc['duty_id']}', defaulting to (1, 0) continuous",
+                  file=sys.stderr)
+            duty = (1, 0)
+        scan_n, sleep_n = duty
+        if prof.n_steps < 2:
+            print(f"# WARN: sensor {sc['sensor_index']} uses single-step "
+                  "heater profile — chip's gas_valid flag never fires on "
+                  "1-step parallel mode, so 0xB0-filtered rows will be 0. "
+                  "Use ≥2 steps for usable data.", file=sys.stderr)
+        plans_by_sensor[sc["sensor_index"]] = SensorPlan(
+            profile=prof, scan_n=scan_n, sleep_n=sleep_n)
 
-    # Fallback: if the config has no sensor_configs, assign the first heater
-    # profile to all 8 sensors (older / simpler configs).
-    if not profiles_by_sensor and cfg["heater_profiles"]:
+    # Fallback for sparse configs: assign first heater profile and
+    # continuous duty to all 8 sensors.
+    if not plans_by_sensor and cfg["heater_profiles"]:
         only = _profile_from_raw(cfg["heater_profiles"][0])
-        profiles_by_sensor = {i: only for i in range(8)}
+        plans_by_sensor = {i: SensorPlan(profile=only, scan_n=1, sleep_n=0)
+                           for i in range(8)}
 
-    return profiles_by_sensor, cfg["duty_cycle"], cfg
+    return plans_by_sensor, cfg
 
 
 # ---------------------------------------------------------------------------
@@ -774,28 +841,31 @@ def main() -> int:
         out_path = args.output
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    profiles_by_sensor, (scan_n, sleep_n), cfg = load_profile(config_path)
-    print(f"# loaded {len(cfg['heater_profiles'])} heater profile(s) "
+    plans_by_sensor, cfg = load_profile(config_path)
+    print(f"# loaded {len(cfg['heater_profiles'])} heater profile(s), "
+          f"{len(cfg['duty_cycle_profiles'])} duty cycle(s) "
           f"from {config_path}", file=sys.stderr)
-    # Summarise unique profiles + which sensors use each.
-    seen_profiles = {}
-    for sidx, prof in profiles_by_sensor.items():
-        key = id(prof)
-        if key not in seen_profiles:
-            # Find the matching heater profile in the raw config for its id.
+    # Summarise unique (profile, duty) combinations + which sensors use each.
+    seen = {}
+    for sidx, plan in plans_by_sensor.items():
+        key = (id(plan.profile), plan.scan_n, plan.sleep_n)
+        if key not in seen:
             label = next((hp["id"] for hp in cfg["heater_profiles"]
-                          if all(int(s["temp_c"]) == prof.target_c[i] and
-                                 int(s["multiplier"]) == prof.multipliers[i]
+                          if all(int(s["temp_c"]) == plan.profile.target_c[i] and
+                                 int(s["multiplier"]) == plan.profile.multipliers[i]
                                  for i, s in enumerate(hp["steps"]))),
                          "?")
-            seen_profiles[key] = (label, prof, [])
-        seen_profiles[key][2].append(sidx)
-    for label, prof, idxs in seen_profiles.values():
+            seen[key] = (label, plan, [])
+        seen[key][2].append(sidx)
+    for label, plan, idxs in seen.values():
+        duty_str = ("continuous"
+                    if plan.continuous
+                    else f"{plan.scan_n} scan / {plan.sleep_n} sleep")
         print(f"#   profile '{label}' on sensors {sorted(idxs)}: "
-              f"{prof.n_steps} steps  shared_dur={prof.gas_wait_shared_ms} ms  "
-              f"cycle ≈ {prof.cycle_ms/1000:.2f} s", file=sys.stderr)
-    print(f"# duty cycle: {scan_n} scan / {sleep_n} sleep "
-          f"(board mode: {cfg['board_mode']})", file=sys.stderr)
+              f"{plan.profile.n_steps} steps  "
+              f"cycle ≈ {plan.profile.cycle_ms/1000:.2f} s  duty: {duty_str}",
+              file=sys.stderr)
+    print(f"# board mode: {cfg['board_mode']}", file=sys.stderr)
 
     signal.signal(signal.SIGINT,  _stop)
     signal.signal(signal.SIGTERM, _stop)
@@ -838,10 +908,10 @@ def main() -> int:
             s = init_sensor(board, cs, i)
             if s is None:
                 continue
-            s.profile = profiles_by_sensor.get(i)
-            if s.profile is None:
-                print(f"# s{i} cs=0x{cs:02X}: no heater profile assigned in "
-                      "bmeconfig — skipping", file=sys.stderr)
+            s.plan = plans_by_sensor.get(i)
+            if s.plan is None:
+                print(f"# s{i} cs=0x{cs:02X}: no plan in bmeconfig — skipping",
+                      file=sys.stderr)
                 continue
             sensors.append(s)
         if not sensors:
@@ -869,8 +939,7 @@ def main() -> int:
             csv_file.flush()
             print(f"# logging to {out_path}", file=sys.stderr)
             try:
-                stream(board, sensors, scan_n, sleep_n,
-                       csv_writer, csv_file)
+                stream(board, sensors, csv_writer, csv_file)
             finally:
                 for s in sensors:
                     disarm(board, s)
