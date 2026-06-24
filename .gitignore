@@ -1,0 +1,25 @@
+# Captured runs — user-specific, not for source control
+data/
+*.csv
+
+# Allow the collaborator's reference CSV (it's an artefact, not a capture)
+!reference/*.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+
+# IDE / editor
+.idea/
+.vscode/
+.claude/
+*.swp
+.DS_Store
+
+# OS
+Thumbs.db
