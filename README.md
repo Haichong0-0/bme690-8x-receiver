@@ -291,6 +291,17 @@ The viz auto-tails the newest `data/bme690_receiver_*.csv`. Confirm:
 | `reference/` | The collaborator's C reader and its README — the demonstration that motivated this Python port. Not used at runtime. |
 | `requirements.txt` | Python dependencies. |
 
+## Authors and acknowledgements
+
+- **Zhaoqi He** — Python receiver, visualiser, bmeconfig parser, project
+  organisation.
+- The collaborator whose C reader (`reference/bme690_69x_reader.c`) first
+  demonstrated the SPI + per-CS approach for the BME690 8x shuttle. The
+  Python receiver mirrors that flow.
+- Bosch Sensortec for the
+  [BME690 SensorAPI](https://github.com/boschsensortec/BME690_SensorAPI),
+  whose register definitions and compensation polynomials are ported here.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). The BME690 SensorAPI that informed the
