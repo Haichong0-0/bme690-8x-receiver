@@ -1,6 +1,6 @@
 {
   "configHeader": {
-    "dateCreated_ISO": "2026-06-24T00:09:51.328Z",
+    "dateCreated_ISO": "2026-06-24T00:00:00.000Z",
     "appVersion": "3.1.0",
     "boardType": "board_690",
     "boardMode": "heater_profile_exploration",
@@ -9,95 +9,19 @@
   "configBody": {
     "heaterProfiles": [
       {
-        "id": "heater_1",
-        "timeBase": 140,
+        "id": "heater_const_320c_10s",
+        "timeBase": 100,
         "temperatureTimeVectors": [
-          [
-            320,
-            429
-          ],
-          [
-            320,
-            429
-          ],
-          [
-            320,
-            429
-          ],
-          [
-            320,
-            429
-          ],
-          [
-            320,
-            429
-          ],
-          [
-            320,
-            429
-          ],
-          [
-            320,
-            429
-          ],
-          [
-            320,
-            429
-          ],
-          [
-            320,
-            429
-          ],
-          [
-            320,
-            429
-          ]
-        ]
-      },
-      {
-        "id": "heater_354",
-        "timeBase": 140,
-        "temperatureTimeVectors": [
-          [
-            320,
-            5
-          ],
-          [
-            100,
-            2
-          ],
-          [
-            100,
-            10
-          ],
-          [
-            100,
-            30
-          ],
-          [
-            200,
-            5
-          ],
-          [
-            200,
-            5
-          ],
-          [
-            200,
-            5
-          ],
-          [
-            320,
-            5
-          ],
-          [
-            320,
-            5
-          ],
-          [
-            320,
-            5
-          ]
+          [320, 100],
+          [320, 100],
+          [320, 100],
+          [320, 100],
+          [320, 100],
+          [320, 100],
+          [320, 100],
+          [320, 100],
+          [320, 100],
+          [320, 100]
         ]
       }
     ],
@@ -109,46 +33,14 @@
       }
     ],
     "sensorConfigurations": [
-      {
-        "sensorIndex": 0,
-        "heaterProfile": "heater_1",
-        "dutyCycleProfile": "duty_1"
-      },
-      {
-        "sensorIndex": 1,
-        "heaterProfile": "heater_354",
-        "dutyCycleProfile": "duty_1"
-      },
-      {
-        "sensorIndex": 2,
-        "heaterProfile": "heater_1",
-        "dutyCycleProfile": "duty_1"
-      },
-      {
-        "sensorIndex": 3,
-        "heaterProfile": "heater_354",
-        "dutyCycleProfile": "duty_1"
-      },
-      {
-        "sensorIndex": 4,
-        "heaterProfile": "heater_1",
-        "dutyCycleProfile": "duty_1"
-      },
-      {
-        "sensorIndex": 5,
-        "heaterProfile": "heater_354",
-        "dutyCycleProfile": "duty_1"
-      },
-      {
-        "sensorIndex": 6,
-        "heaterProfile": "heater_1",
-        "dutyCycleProfile": "duty_1"
-      },
-      {
-        "sensorIndex": 7,
-        "heaterProfile": "heater_354",
-        "dutyCycleProfile": "duty_1"
-      }
+      { "sensorIndex": 0, "heaterProfile": "heater_const_320c_10s", "dutyCycleProfile": "duty_1" },
+      { "sensorIndex": 1, "heaterProfile": "heater_const_320c_10s", "dutyCycleProfile": "duty_1" },
+      { "sensorIndex": 2, "heaterProfile": "heater_const_320c_10s", "dutyCycleProfile": "duty_1" },
+      { "sensorIndex": 3, "heaterProfile": "heater_const_320c_10s", "dutyCycleProfile": "duty_1" },
+      { "sensorIndex": 4, "heaterProfile": "heater_const_320c_10s", "dutyCycleProfile": "duty_1" },
+      { "sensorIndex": 5, "heaterProfile": "heater_const_320c_10s", "dutyCycleProfile": "duty_1" },
+      { "sensorIndex": 6, "heaterProfile": "heater_const_320c_10s", "dutyCycleProfile": "duty_1" },
+      { "sensorIndex": 7, "heaterProfile": "heater_const_320c_10s", "dutyCycleProfile": "duty_1" }
     ]
   }
 }

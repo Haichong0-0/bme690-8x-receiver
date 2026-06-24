@@ -184,14 +184,22 @@ def main() -> int:
     print(f"wrote {out}")
 
     if args.print_report:
+        # On-chip parallel-mode cycle: step time = multiplier × timeBase.
+        # (In forced mode the chip would interpret gas_wait_x as an absolute
+        # duration, which saturates at 4032 ms; that's what `real(ms)` shows.)
+        parallel_step_ms = [s["multiplier"] * result["time_base"]
+                            for s in result["steps"]]
+        parallel_cycle_ms = sum(parallel_step_ms)
         print(f"\nprofile id : {result['profile_id']}")
         print(f"board      : {result['board_type']}  mode: {result['board_mode']}")
         print(f"timeBase   : {result['time_base']}  divisor: {result['divisor']}")
-        print(f"total cycle: {result['total_cycle_ms']:.1f} ms")
-        print(f"\n  #   T(°C)   req(ms)   real(ms)   gas_wait")
+        print(f"parallel-mode cycle: {parallel_cycle_ms/1000:.2f} s "
+              f"(this is what the receiver uses)")
+        print(f"\n  #   T(°C)    mul   step (parallel)   gas_wait   forced(ms)")
         for i, s in enumerate(result["steps"]):
-            print(f"  {i:<3} {s['temp_c']:>5}   {s['dur_ms_requested']:>7.1f}   "
-                  f"{s['dur_ms_realised']:>8.1f}   0x{s['gas_wait_byte']:02X}")
+            print(f"  {i:<3} {s['temp_c']:>5}   {s['multiplier']:>4}   "
+                  f"{parallel_step_ms[i]/1000:>10.2f}s        "
+                  f"0x{s['gas_wait_byte']:02X}       {s['dur_ms_realised']:>6.1f}")
 
     return 0
 

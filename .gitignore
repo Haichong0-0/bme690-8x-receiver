@@ -14,6 +14,10 @@ __pycache__/
 venv/
 env/
 
+# Side-effect output from `bmeconfig_to_profile.py --print` — the
+# receiver doesn't use this file, the converter just always writes one.
+*_profile.py
+
 # IDE / editor
 .idea/
 .vscode/
