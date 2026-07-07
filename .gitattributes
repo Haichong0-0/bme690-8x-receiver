@@ -1,0 +1,17 @@
+# Repo-root attribute macros for the Unity subprojects (Fruit_vis/, HololensFruit/).
+#
+# Git only honours [attr] macro definitions in the TOP-LEVEL .gitattributes, so
+# they live here rather than in Fruit_vis/.gitattributes — that file was a repo
+# root before this codebase was flattened into one repo, and git rejects its
+# in-subdirectory [attr] lines ("not allowed"). The pattern->macro mappings in
+# Fruit_vis/.gitattributes resolve against the definitions below.
+#
+# NOTE: git-lfs is deliberately NOT used. The `lfs` macro just marks matched
+# files as binary, so the repo stays fully self-contained — it clones without
+# git-lfs installed and can't leave anyone with broken LFS pointer files.
+[attr]lfs        -text
+[attr]unity-json eol=lf linguist-language=json
+[attr]unity-yaml eol=lf linguist-language=yaml merge=unityyamlmerge
+
+# Normalise text line endings in the repo; leave binary files untouched.
+* text=auto

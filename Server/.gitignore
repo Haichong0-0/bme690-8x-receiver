@@ -1,0 +1,36 @@
+# Captured runs — user-specific, not for source control
+data/
+*.csv
+
+# Trained model artifacts (copied from ML/models/, regenerable via
+# ML/train.py) — large binaries, not for source control
+models/
+
+# Allow the collaborator's reference CSV (it's an artefact, not a capture)
+!reference/*.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Side-effect output from `bmeconfig_to_profile.py --print` — the
+# receiver doesn't use this file, the converter just always writes one.
+*_profile.py
+# ...but keep the source module, which also ends in "_profile.py" and must
+# stay tracked (matters now this tree is committed as part of the monorepo).
+!bmeconfig_to_profile.py
+
+# IDE / editor
+.idea/
+.vscode/
+.claude/
+*.swp
+.DS_Store
+
+# OS
+Thumbs.db

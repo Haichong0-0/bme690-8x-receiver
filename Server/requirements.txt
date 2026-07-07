@@ -1,0 +1,9 @@
+coinespy>=1.0
+matplotlib>=3.5
+websockets>=12.0
+
+# real_ml.py — loading and running the trained classifier/regressor
+joblib>=1.3
+numpy>=2.0
+pandas>=2.2
+scikit-learn>=1.5

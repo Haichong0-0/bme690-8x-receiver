@@ -1,0 +1,306 @@
+# ML — odour classification + strength regression preprocessing
+
+Turns raw `data/raw/*.csv` captures into a training-ready dataset:
+per-cycle odour fingerprints (`X_window`) plus a 0→1 relative-strength
+regression target (`y_conc`), per the pipeline in the original preprocessing
+plan (Stages 1-6, `plan.md`'s classify-then-regress design).
+
+This folder is offline/training-side only — no runtime dependency on
+`Server/`, not a git repo of its own. Raw capture CSVs live here
+(`data/raw/`, gitignored), not in `Server/` — `Server/` is the live/deployed
+side (`real_ml.py`) and only needs the trained model artifacts copied over
+from `models/`, not the data that produced them. `ML/` does read
+`Server/bmeconfig_to_profile.py` (code, to know which chip-selects run the
+HP354 profile) and `Server/Sample.bmeconfig` (the capture config, not
+training data) — but nothing in `Server/` imports back into `ML/`.
+
+## Usage
+
+```
+pip install -r requirements.txt
+python build_dataset.py
+```
+
+Writes to `data/processed/`:
+
+- **`cycle_dataset.csv`** — one row per (run, sensor, cycle): `run_id, odour,
+  sensor_id, cycle_index, cycle_timestamp, phase, y_conc, step_0..step_9`
+  (cleaned log-resistance at each of the 10 heater steps). Good for
+  classification (works off single cycles, no windowing needed) and for
+  inspecting labels directly in a spreadsheet/pandas.
+- **`window_dataset.npz`** — regression-ready: `X_window` `[n, N, 10]` float32
+  (N = `--window` cycles, default 5), `y_conc` `[n]` float32, `y_class` `[n]`
+  string, `run_id` `[n]` string, `sensor_id` `[n]` int, plus `trend_slope` /
+  `trend_diff_last` engineered dynamics features per window.
+- **`run_fits.csv`** — one row per (run, sensor, rise-or-decay segment):
+  `tau_s, r_squared, n_cycles, duration_s, asymptote_unreliable`. Check this
+  (and the PNGs below) before trusting the labels.
+- **`meta.json`** — pipeline-wide summary: odours discovered, cycle counts by
+  phase, low-R² / unreliable-asymptote counts, imputation rate.
+- **`data/diagnostics/*.png`** (one per run×sensor) — the cleaned curve
+  colour-coded by detected phase with the resulting `y_conc` overlay. The
+  plan explicitly calls for visually validating the curve fit before trusting
+  it — do that here before training on this data.
+
+Stage 5 (scaling) and Stage 6 (split) are **not** applied by this script —
+which split to fit a scaler on is a training-time decision. Import the
+dataset above, then use `smell_ml.split.train_test_split_by_run(run_id, ...)`
+(or `leave_one_run_out`) and `smell_ml.scaling.WindowScaler` in your own
+training script, fitting the scaler on the training split only.
+
+## Module map (`smell_ml/`)
+
+For the stage-by-stage writeup with worked examples (a raw cycle traced all
+the way to a training sample, and every deviation from the original plan
+explained), see [`PREPROCESSING.md`](PREPROCESSING.md).
+
+| File | Stage | What |
+|---|---|---|
+| `io.py` | — | Load a capture CSV, parse `run_id`/`odour` from the filename |
+| `grid.py` | 2a/2b | HP354 sensor selection, true cycle-boundary detection, (cycle × step) grid |
+| `clean.py` | 1 | Impute, low-pass filter (on by default), log-transform, per (sensor, step) channel |
+| `align.py` | 2c | Optional spline (linear, log-space) step-offset alignment |
+| `labels.py` | 3 | Automatic phase detection from curve shape + per-segment exponential fit → `y_conc` |
+| `windowing.py` | 4 | Sliding windows over cycles, per sensor |
+| `scaling.py` | 5 | z-score `WindowScaler`, fit-on-train-only |
+| `split.py` | 6 | Group-aware split / leave-one-run-out, `group=run_id` |
+| `diagnostics.py` | — | Per-run fit/phase PNGs |
+| `models.py` | — | Classifier/regressor definitions + leave-one-run-out evaluation harness |
+
+## Training
+
+```
+python train.py
+```
+
+Reads `data/processed/`, evaluates via leave-one-run-out (9 folds — every
+capture held out once), then refits on all data and writes to `models/`:
+`classifier.joblib` + `classifier_scaler.joblib`, `regressor.joblib` +
+`regressor_scaler.joblib`, `metadata.json` (LORO metrics, confusion matrix,
+which cycle-phase filter the classifier used).
+
+### Evaluation plots
+
+```
+python evaluate.py                    # rf regressor (the deployed default)
+```
+
+Overlays the strength regressor's **out-of-fold** predictions (each run
+predicted by a model trained on the other 8) onto each run's diagnostic curve:
+dashed black = true strength, dotted green = predicted. (The strength label is
+the `y_conc` column in the processed data — same 0-1 value, just named
+"strength" in the human-facing wording to avoid implying absolute
+concentration.) One PNG per (run, sensor) to `data/diagnostics_eval/`, titled
+with that run's LORO MAE/R². Makes it visible *where* the model tracks strength
+and where it drifts — e.g. the worst fold predicts rise/plateau fine but keeps
+strength pinned high through the recovery instead of following it down.
+
+Every run also appends a row to **`experiments.csv`** (machine-readable) and
+regenerates **`EXPERIMENTS.md`** (the same data as a markdown table) —
+whatever preprocessing params `data/processed/meta.json` says were used
+(lowpass filter, window size, ...) alongside that run's LORO results, plus
+which classifier/regressor algorithm was used (`--classifier-algo`,
+`--regressor-algo`; see `smell_ml.models.CLASSIFIER_FACTORIES` /
+`REGRESSOR_FACTORIES` for the full list — RandomForest, GradientBoosting,
+SVM, logistic regression / Ridge, k-NN). Use `--note "..."` to record what
+you changed. Don't hand-edit `EXPERIMENTS.md`; it's regenerated from
+`experiments.csv` every `train.py` run.
+
+### Algorithm + preprocessing sweep results
+
+23 experiments in `experiments.csv` / `EXPERIMENTS.md` — see there for the
+full table. Summary of what moved the numbers, each holding everything else
+fixed at the exp-2 baseline (lowpass off, window=5, `plateau` classifier
+cycles, RandomForest/RandomForest):
+
+**Classifier algorithm** (regressor held at `rf`): **logreg 0.746** > svm
+0.688 > rf 0.581 (baseline) > gb 0.561 > knn 0.534. Logistic regression won
+by a wide margin — plausible given the classifier's job here is close to
+linearly separating 10-dim step vectors by odour, which a simpler,
+lower-variance model handles better than tree ensembles with only ~700
+plateau cycles per class to fit on.
+
+**Regressor algorithm** (classifier held at `rf`): **rf R²=0.859**
+(baseline) > svr 0.799 > knn 0.793 > ridge 0.736. RandomForest stayed best —
+Ridge's poor showing (linear model) confirms the strength curve's
+dynamics genuinely need a nonlinear fit, consistent with Stage 3's
+exponential curve-fit design.
+
+**Window size** (classifier unaffected — window only changes regression
+data): R² 3=**0.868** > 5=0.859 > 10=0.837 > 15=0.817. Monotonically worse
+with larger windows — the strength changes faster (tau mostly 100-600s,
+cycles ~8-11s apart) than a big window can stay local to, so it starts
+blending in stale context instead of helping.
+
+**Lowpass filter, revisited with the better classifier**: turning it back on
+still helps logreg on raw features a little (0.746 → 0.755) — smaller effect
+than it had on `rf` (0.611 → 0.581 the other way, i.e. filtering helped `rf`
+more than it now helps `logreg`), but real. Regressor R² unaffected either
+way, as before.
+
+**Classifier phase filter**: `plateau` still beats `high_conc` — consistent
+with the exp-2 finding, at every feature set tried.
+
+**Classifier features** (lowpass ON, window=3, logreg, plateau): raw 10 steps
+0.755 → **`raw_gradient` 0.799** — the 10 steps PLUS their 9 step-to-step
+gradients (`np.diff`), i.e. the derivative/shape of the temperature sweep —
+beating `gradient`-only (0.793) and `temp_contrast` (0.728). The gradient is a
+log response-ratio across temperatures, the classic MOx selectivity feature,
+and it lifts *every* classifier (rf 0.611→0.714, svm 0.697→0.796). It helps
+`logreg` too, even though a gradient is a linear combination of the raw steps:
+with L2 regularisation + per-feature standardisation the representation still
+matters (an *unregularised* linear model would gain nothing from it). See
+`train.load_classification_data` and `real_ml.py`'s docstring.
+
+**Best combined config** (exp 23: lowpass ON + window=3 + logreg + rf +
+`raw_gradient` features) beats every single-dimension winner: classifier
+**accuracy 0.799, f1_macro 0.543**; regressor **MAE 0.069, RMSE 0.118,
+R² 0.872**. This is what `data/processed/` and `models/` are currently built
+with.
+
+Confusion matrix for the best config (grapefruit↔sorange is now the whole
+error mode; lemon is cleanly separated):
+
+```
+              predicted:
+              grapefruit  lemon  sorange
+  grapefruit:    502        0      198
+  lemon:           0      747        2
+  sorange:        196        0      433
+```
+
+Lemon is now near-perfect (747/749, up from 724/749 on raw features — the
+gradient features near-eliminated the lemon↔sorange leak raw had). The residual
+is entirely grapefruit↔sorange, both directions — plausibly the same underlying
+cause (shared dominant citrus terpenes). Likely next steps if it needs to go
+further: collect more repeats (3/odour is thin for any classifier), or — if
+`sorange` isn't actually in the live rotation (see the lavender-vs-sorange note
+below) — retrain a 2-class lemon-vs-grapefruit classifier and drop the hard
+pair entirely.
+
+For reference, this is the exp-2 baseline confusion matrix (RandomForest,
+lowpass off, window=5) that motivated trying other algorithms in the first
+place:
+
+```
+              predicted:
+              grapefruit  lemon  sorange
+  grapefruit:    186        1      533
+  lemon:           5      737       16
+  sorange:        266      51      321
+```
+
+A baseline-relative feature variant (subtracting each run's own clean-air
+mean, on the theory that raw resistance carries session-to-session drift)
+was also tried early on and made `rf` accuracy *worse* (0.61 → 0.48), which
+rules out simple absolute-level drift as the root cause — see `train.py`'s
+`load_classification_data` docstring.
+
+## What the real data actually looks like (read this before trusting labels)
+
+The original plan was written before any real multi-run captures existed, so
+several of its stages made assumptions that turned out not to match the real
+captures (`data/raw/*.csv`). This pipeline was built and corrected against
+that real data, not against the plan's assumptions — here's what changed and
+why, in the order they were found:
+
+1. **`scanning_cycle_index` (the CSV's own column) does not mark heater-cycle
+   boundaries.** It looked like the obvious cycle key (already in the raw
+   CSV, no heuristic needed), but a single `scanning_cycle_index` value can
+   contain step readings from up to 3 different heater passes — it's some
+   other, coarser counter. The real cycle boundary is a
+   `heater_profile_step_index` wraparound (this row's step index < the
+   previous row's), which `grid.true_cycle_index` detects directly: 213/215
+   detected cycles in a spot-checked run land on exactly 10 rows, vs. a
+   garbled 1-11 rows/group grouping by `scanning_cycle_index`.
+
+2. **`label_tag` (the collection board's phase-labelling buttons) is unused —
+   always 0 — in every capture so far.** So Stage 2b/3's phase tags can't
+   come from the tags. But the phase structure is very much *present in the
+   curve shape*: every one of the 9 real captures traces a near-identical
+   warm-up → baseline (wide, stable, high resistance) → rise → plateau (wide,
+   stable, low resistance) → decay shape, with strikingly consistent timing
+   across all 9 runs regardless of odour (rise ~0-100s, baseline plateau
+   ~100-550s, transition ~550-700s, exposure plateau ~700-1250s, recovery
+   ~1250s to file end). `labels.detect_phases` recovers this directly from
+   the curve instead of relying on tags that were never populated. If a
+   future capture actually populates `label_tag`, `process_run` in
+   `build_dataset.py` will raise `NotImplementedError` rather than silently
+   mis-labelling it — tag-based segmentation isn't implemented because there
+   was no tagged data to build or test it against.
+
+3. **Resistance direction is inverted from what "plateau"/"baseline" sound
+   like.** BME690 (MOx) resistance drops under exposure to reducing-gas VOCs
+   (citrus terpenes qualify) and recovers on clearance. The *low*, wide,
+   stable region is peak exposure (`y_conc = 1.0`) and the *high*, wide,
+   stable region is clean-air baseline (`y_conc = 0.0`) — confirmed by which
+   region is wider/more stable and which comes first in time, not by raw
+   magnitude.
+
+4. **The very first ~100s of every run is excluded as `phase = "warmup"`,
+   not treated as the baseline.** It's a short, one-off climb up to the same
+   level as the (much longer) stable baseline plateau that follows — almost
+   certainly heater/thermal warm-up transient, not part of the odour
+   protocol. Its `y_conc` is left `NaN` and it's excluded from
+   `window_dataset.npz` (windowing skips gaps in valid `y_conc` rather than
+   bridging across them — see `_valid_blocks` in `build_dataset.py`).
+
+5. **Every run stops before the post-exposure recovery fully reaches
+   baseline.** The `decay` phase (the plan's actual strength-decay
+   sweep) is captured from 1250s to file end (1800s), but the curve is often
+   still climbing at that point. The exponential fit's asymptote is then an
+   extrapolation past what was actually observed — `run_fits.csv`'s
+   `asymptote_unreliable` column flags fits where `tau > 3x` the segment's
+   observed duration (a handful of the 72 rise/decay fits, e.g. some `sorange`
+   sensor-5 decays with `tau` in the millions of seconds). Those y_conc
+   values are real numbers but shakier than the rest — check the PNG before
+   trusting them.
+
+6. **The `.bmeconfig`'s `gas_wait` for `heater_354` step 3 silently saturates**
+   (4200ms requested, 4032ms max — this is a real bug in
+   `Server/bmeconfig_to_profile.py`, now fixed and warns on stderr). Doesn't
+   affect this pipeline directly (it reads captured resistance, not the
+   heater-wait encoding) but explains the warning printed at the top of
+   `build_dataset.py`'s output.
+
+7. **Captured odours are `lemon`, `grapefruit`, `sorange`** — not
+   `plan.md`'s declared `lemon`/`grapefruit`/`lavender`. `build_dataset.py`
+   doesn't hard-code an odour set (it discovers odours from filenames) but
+   prints a warning about the mismatch. Confirm with whoever's driving
+   collection whether `sorange` (sweet orange?) is a deliberate substitute
+   for lavender or a placeholder/test capture before training on it.
+
+## Open parameters (plan explicitly leaves these for empirical tuning)
+
+| Parameter | Code default | Basis / sweep finding |
+|---|---|---|
+| Butterworth low-pass | **on** (`clean.clean_sensor_grid(apply_lowpass=True)`; `--no-lowpass` to disable) | Went back and forth on this. A cutoff-fraction sweep first suggested off (raw and `cutoff_fraction=0.05` nearly overlap on the raw signal). The later algorithm sweep showed it measurably helps classification either way: `rf` 0.611 vs 0.581 off, and `logreg` (on raw features) 0.755 vs 0.746 off — with no regression-side cost. Net: on. |
+| Butterworth order | 1 | Copied from the honey paper — untouched since order interacts less with the wrong-`fs` problem than cutoff does. |
+| log-transform order | before filtering | Chosen empirically: the real decay/rise segments are close to linear in log-space (fits hit R² 0.96-1.0), which wouldn't hold filtering-then-logging raw resistance given the multi-order-of-magnitude swings between heater steps. |
+| Step-alignment (Stage 2c) | off (`align.JITTER_ABS_THRESHOLD_S = 0.3`s) | Measured real jitter is std ~0.05-0.09s against multi-second step spacings — confirmed negligible, not assumed. The spline path exists and is exercised for robustness but not currently triggered by any real run. |
+| Window size `N` | **3 cycles** (`windowing.DEFAULT_WINDOW`) | Swept 3/5/10/15: regressor R² is monotonically worse with larger windows (0.868/0.859/0.837/0.817) — the strength changes faster than a big window stays local to. 3 was the smallest tried and won; going smaller still is untested. |
+| Classifier algorithm | **logreg** (`--classifier-algo`) | Swept rf/gb/svm/logreg/knn: logistic regression won by a wide margin (0.746-0.755 vs rf's 0.581-0.611), plausibly because the classification task is closer to linearly separable in this feature space than tree ensembles can exploit with only ~700 examples/class. |
+| Classifier features | **raw_gradient** (`--classifier-features`) | Swept raw / gradient / raw_gradient / temp_contrast: `raw_gradient` (the 10 log-R steps + their 9 step-to-step gradients — the temperature-sweep shape) won at 0.799 vs raw's 0.755, and near-eliminated lemon misclassification. Helps every classifier. `real_ml.py` reads the choice from `metadata.json` and applies the same transform live. |
+| Regressor algorithm | **rf** (`--regressor-algo`) | Swept rf/gb/ridge/svr/knn: `rf` stayed best (R²=0.859-0.872 vs next-best svr 0.799). Ridge's poor showing confirms the dynamics are genuinely nonlinear. |
+| Strength fit target | mean log-resistance across all 10 steps | Simplification: averages across very different heater temperatures rather than picking one "best" step. Fits ended up excellent (R² 0.96-1.0) so this wasn't revisited, but a per-step or best-step fit is worth trying if classification/regression accuracy plateaus. |
+| Rise phase included | yes | Plan calls this optional; included since it roughly doubles labelled decay-direction data and its fits are consistently the best (R² ~0.995-1.0). |
+| Purge phase | not separately detected | No real capture shows the post-decay curve re-stabilizing before file end, so there's nothing to detect yet — the whole post-plateau tail is treated as one continuous `decay` fit. Revisit if a future capture runs long enough to show it. |
+
+Full sweep: `experiments.csv` / `EXPERIMENTS.md` (23 runs, including the
+confirmation run that these defaults reproduce the best combined
+configuration with zero flags, and the later feature sweep that added the
+`raw_gradient` win). To go back to the original vanilla baseline
+(RandomForest/RandomForest, lowpass off, window=5) for comparison: `python
+build_dataset.py --no-lowpass --window 5` + `python train.py
+--classifier-algo rf --regressor-algo rf`.
+
+## Known caveats
+
+- Only 3 repeats per odour (9 runs total) — `smell_ml.split` offers
+  leave-one-run-out for a more stable estimate than a single held-out split,
+  per the plan's own caution about this.
+- `sensor_id` in the output is the physical chip-select (1/3/5/7), not a
+  0-indexed position — keep that in mind if you one-hot it.
+- Classification labels (`y_class`) are just the filename-parsed odour string
+  — there's no independent ground truth beyond that filename, so a
+  mislabelled capture would propagate silently.

@@ -1,0 +1,24 @@
+exp_id,timestamp,lowpass_filter_applied,window_size_cycles,classifier_phase_filter,classifier_algo,classifier_features,regressor_algo,n_cycles_total,n_windows_total,classifier_loro_accuracy,classifier_loro_f1_macro,regressor_loro_mae,regressor_loro_rmse,regressor_loro_r2,notes
+1,2026-07-02T19:56:50Z,True,5,plateau,rf,raw,rf,7736,6768,0.611,0.3787,0.0702,0.12,0.8607,"Butterworth lowpass ON, cutoff_fraction=0.05 order=1 (original Stage 1 default)"
+2,2026-07-02T19:58:05Z,False,5,plateau,rf,raw,rf,7736,6611,0.5814,0.3376,0.0667,0.1223,0.8585,Butterworth lowpass OFF (new default) - cutoff sweep vs raw signal showed filtering wasn't earning its complexity; low cutoffs actively clipped peaks
+3,2026-07-02T20:20:13Z,False,5,plateau,gb,raw,gb,7736,6611,0.561,0.364,0.0695,0.1201,0.8805,"algo sweep: classifier=gb, regressor=gb (both changed from baseline rf/rf)"
+4,2026-07-02T20:22:12Z,False,5,plateau,svm,raw,rf,7736,6611,0.6883,0.4876,0.0667,0.1223,0.8585,"algo sweep: classifier=svm, regressor=rf"
+5,2026-07-02T20:23:07Z,False,5,plateau,logreg,raw,rf,7736,6611,0.7461,0.4476,0.0667,0.1223,0.8585,"algo sweep: classifier=logreg, regressor=rf"
+6,2026-07-02T20:23:59Z,False,5,plateau,knn,raw,rf,7736,6611,0.5338,0.329,0.0667,0.1223,0.8585,"algo sweep: classifier=knn, regressor=rf"
+7,2026-07-02T20:25:19Z,False,5,plateau,gb,raw,rf,7736,6611,0.561,0.364,0.0667,0.1223,0.8585,"algo sweep: classifier=gb, regressor=rf"
+8,2026-07-02T20:25:33Z,False,5,plateau,rf,raw,svr,7736,6611,0.5814,0.3376,0.0992,0.141,0.799,"algo sweep: classifier=rf, regressor=svr"
+9,2026-07-02T20:25:44Z,False,5,plateau,rf,raw,ridge,7736,6611,0.5814,0.3376,0.1505,0.1891,0.7359,"algo sweep: classifier=rf, regressor=ridge"
+10,2026-07-02T20:25:59Z,False,5,plateau,rf,raw,knn,7736,6611,0.5814,0.3376,0.0782,0.1477,0.7928,"algo sweep: classifier=rf, regressor=knn"
+11,2026-07-02T20:27:38Z,True,5,plateau,logreg,raw,rf,7736,6768,0.7551,0.4535,0.0702,0.12,0.8607,"preprocessing sweep: lowpass=ON window=5, best algo combo (logreg/rf) - does lowpass help the better classifier too?"
+12,2026-07-02T20:28:20Z,False,3,plateau,logreg,raw,rf,7736,6683,0.7461,0.4476,0.0649,0.1208,0.8677,"preprocessing sweep: window=3, best algo combo (logreg/rf)"
+13,2026-07-02T20:29:59Z,False,10,plateau,logreg,raw,rf,7736,6431,0.7461,0.4476,0.0714,0.126,0.8373,"preprocessing sweep: window=10, best algo combo (logreg/rf)"
+14,2026-07-02T20:32:27Z,False,15,plateau,logreg,raw,rf,7736,6251,0.7461,0.4476,0.0753,0.1312,0.817,"preprocessing sweep: window=15, best algo combo (logreg/rf)"
+15,2026-07-02T20:33:28Z,False,5,high_conc,logreg,raw,rf,7736,6611,0.7254,0.388,0.0667,0.1223,0.8585,"preprocessing sweep: classifier_phase_filter=high_conc (explicit, vs plateau), best algo combo (logreg/rf)"
+16,2026-07-02T20:34:42Z,True,3,plateau,logreg,raw,rf,7736,6840,0.7551,0.4535,0.0687,0.1177,0.8718,BEST COMBINED CONFIG: lowpass=ON + window=3 + classifier=logreg + regressor=rf (best of each sweep dimension combined)
+17,2026-07-02T20:41:17Z,True,3,plateau,logreg,raw,rf,7736,6840,0.7551,0.4535,0.0687,0.1177,0.8718,confirm new defaults (lowpass=on window=3 logreg/rf) reproduce exp16 with no explicit flags
+18,2026-07-02T22:09:58Z,True,3,plateau,logreg,raw,rf,7736,6840,0.7551,0.4535,0.0687,0.1177,0.8718,rebuild after raw CSVs restored to ML/data/raw/ (moved from Server/data/ per new architecture)
+19,2026-07-05T17:08:33Z,True,3,plateau,logreg,raw,rf,7736,6840,0.7551,0.4535,0.0687,0.1177,0.8718,temp-contrast study: baseline raw 10-step features + logreg (control)
+20,2026-07-05T17:09:02Z,True,3,plateau,logreg,temp_contrast,rf,7736,6840,0.728,0.5097,0.0687,0.1177,0.8718,"temp-contrast study (deep-research rec #2): raw 10 steps + cross-temperature contrast features, logreg"
+21,2026-07-05T17:09:35Z,True,3,plateau,rf,temp_contrast,rf,7736,6840,0.6843,0.4719,0.0687,0.1177,0.8718,"temp-contrast study (deep-research rec #2): raw 10 steps + cross-temperature contrast features, rf"
+22,2026-07-05T17:10:04Z,True,3,plateau,svm,temp_contrast,rf,7736,6840,0.797,0.5751,0.0687,0.1177,0.8718,"temp-contrast study (deep-research rec #2): raw 10 steps + cross-temperature contrast features, svm"
+23,2026-07-06T15:59:13Z,True,3,plateau,logreg,raw_gradient,rf,7736,6840,0.7989,0.5429,0.0687,0.1177,0.8718,"raw+gradient (step-diff shape) features; sweep winner, near-eliminates lemon misclassification"

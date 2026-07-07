@@ -1,0 +1,68 @@
+# Root .gitignore — C:\kurf\Codebase (XR Smell Reconstruction), single monorepo.
+#
+# Server/, Fruit_vis/, and ML/ each keep their own .gitignore, which git
+# honours for that subtree automatically — so the rules here mainly cover the
+# repo root and HololensFruit/ (the one project folder with no .gitignore of
+# its own). The nested Server/.git and Fruit_vis/.git repos were removed when
+# this codebase was flattened into one repo; their earlier standalone history
+# still lives on GitHub (Haichong0-0/bme690-8x-receiver, Haichong0-0/Fruit_vis).
+
+# --- OS / editor / tooling ---
+Thumbs.db
+[Dd]esktop.ini
+.DS_Store
+*.swp
+.idea/
+.vscode/
+.vs/
+.claude/
+*.log
+*.tmp
+*.slnx
+
+# --- Python (ML/ and any root-level scripts) ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Excel lock files (ML/experiments.csv is often open in Excel)
+~$*
+
+# Sensor captures that land outside the already-ignored ML/data/ and
+# Server/data/ — e.g. running the receiver from the repo root creates ./data/.
+bme690_receiver_*.csv
+/data/
+
+# ---------------------------------------------------------------------------
+# HololensFruit/ — legacy Unity 2019.4 project (kept for its fruit-model asset
+# packs); it has no .gitignore of its own, so its generated output is covered
+# here. Assets/, ProjectSettings/, Packages/ and .vsconfig stay tracked.
+# ---------------------------------------------------------------------------
+/HololensFruit/[Ll]ibrary/
+/HololensFruit/[Tt]emp/
+/HololensFruit/[Oo]bj/
+/HololensFruit/[Bb]uild/
+/HololensFruit/[Bb]uilds/
+/HololensFruit/[Ll]ogs/
+/HololensFruit/[Uu]ser[Ss]ettings/
+/HololensFruit/[Mm]emoryCaptures/
+/HololensFruit/QCAR/
+/HololensFruit/*.csproj
+/HololensFruit/*.sln
+/HololensFruit/mrtk_log_mostRecentET.csv
+
+# Unity crash-report junk (can appear next to any Unity project)
+sysinfo.txt
+mono_crash.*
+
+# Files over GitHub's 100 MiB per-file limit — kept on local disk but excluded
+# from the GitHub backup. Both are legacy HololensFruit assets not used by the
+# active Server/Fruit_vis/ML pipeline (the SDF atlas regenerates from its .ttc
+# font in Unity; the .obj is an unrelated 3D model).
+HololensFruit/Assets/msyhbd SDF.asset*
+d9cf5d54ff12795c6c388776eec85dc3.obj*
