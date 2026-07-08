@@ -67,6 +67,108 @@ explained), see [`PREPROCESSING.md`](PREPROCESSING.md).
 | `diagnostics.py` | — | Per-run fit/phase PNGs |
 | `models.py` | — | Classifier/regressor definitions + leave-one-run-out evaluation harness |
 
+## Script reference
+
+The runnable entry points, what each is for, and its flags (run from `ML/`;
+`python <script> -h` for the full list). The `smell_ml/` modules above are a
+**library** — imported by these scripts, not run directly; see
+[`PREPROCESSING.md`](PREPROCESSING.md) for their stage-by-stage detail.
+
+### `build_dataset.py` — raw captures → training dataset
+
+The main entry point. Runs Stages 1–4 over every
+`data/raw/bme690_receiver_*.csv` for the HP354 sensors and writes the processed
+dataset to `data/processed/`. Thin wrapper around
+`preprocess.py --training --profile hp354`.
+
+```bash
+python build_dataset.py                          # defaults: lowpass on, window 3
+python build_dataset.py --window 5 --no-lowpass  # override for comparison
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--window <n>` | 3 | Cycles per regression window. |
+| `--no-lowpass` | (lowpass on) | Disable the Stage-1 Butterworth filter. |
+| `--no-diagnostics` | (on) | Skip the per-run diagnostic PNGs. |
+| `--data-dir` / `--out-dir` / `--bmeconfig` | see `-h` | Input / output / config paths. |
+
+### `preprocess.py` — the pipeline, with a diagnostics-only mode
+
+What `build_dataset.py` wraps. Adds a `--profile` switch and a training vs
+diagnostics-only toggle — use it directly to eyeball the **constant-320**
+sensors (never used for training) without writing a dataset.
+
+```bash
+python preprocess.py --training                  # == build_dataset.py (HP354 → dataset)
+python preprocess.py --profile const320          # const-320 sensors → PNGs only, nothing saved
+python preprocess.py --profile hp354             # HP354 diagnostics only (no dataset)
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--profile {hp354,const320}` | hp354 | Which sensor set to process. |
+| `--training` | off | Save the dataset (hp354 only). Without it, only PNGs are drawn. |
+| `--window` / `--no-lowpass` / `--no-diagnostics` / `--data-dir` / `--out-dir` / `--diag-dir` / `--bmeconfig` | see `-h` | As `build_dataset.py`. |
+
+### `train.py` — evaluate (LORO) + refit + save models
+
+Reads `data/processed/`, runs leave-one-run-out evaluation, refits on all data,
+and writes `models/` (`classifier.joblib`, `regressor.joblib`, scalers,
+`metadata.json`) plus a row in `experiments.csv` / `EXPERIMENTS.md`. Run
+`build_dataset.py` first.
+
+```bash
+python train.py                                  # deployed defaults (logreg + raw_gradient, rf)
+python train.py --classifier-algo svm --note "trying svm"
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--classifier-algo {rf,gb,svm,logreg,knn}` | logreg | Classifier algorithm. |
+| `--classifier-features {raw,gradient,raw_gradient,temp_contrast}` | raw_gradient | Feature set — must match what `real_ml.py` will serve. |
+| `--classifier-phase-filter {plateau,high_conc}` | auto (tries both) | Which cycles train the classifier. |
+| `--regressor-algo {rf,gb,ridge,svr,knn}` | rf | Regressor algorithm. |
+| `--models-dir` / `--seed` / `--note` | see `-h` | Output dir / RNG seed / experiments.csv note. |
+
+**To deploy:** copy `ML/models/*` → `Server/models/`.
+
+### `evaluate.py` — out-of-fold prediction plots
+
+Overlays the regressor's leave-one-run-out predictions on each run's curve
+(dashed = true strength, dotted = predicted) → `data/diagnostics_eval/`. For
+*seeing* where strength tracking drifts, per run and sensor.
+
+```bash
+python evaluate.py                               # rf (the deployed regressor)
+python evaluate.py --regressor-algo gb
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--regressor-algo {rf,gb,ridge,svr,knn}` | rf | Regressor to evaluate. |
+| `--eval-dir` / `--seed` | see `-h` | Output dir / RNG seed. |
+
+### `testing/test_capture.py` — test the deployed model on a fresh capture
+
+Takes one raw CSV the model has never seen, runs it through the same
+preprocessing, and plots predicted strength + predicted odour per sensor.
+Genuine held-out testing (vs `evaluate.py`, which is LORO over the *training*
+runs). The input needn't follow the training filename convention.
+
+```bash
+python testing/test_capture.py path/to/bme690_receiver_<ts>.csv
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--models-dir` | `ML/models/` | Which trained model to test. |
+| `--bmeconfig` | `Sample.bmeconfig` | Identifies the HP354 sensors. |
+| `--out-dir` | `testing/output/` | Where plots go. |
+| `--no-lowpass` | (on) | Match a model trained without the filter. |
+
+---
+
 ## Training
 
 ```

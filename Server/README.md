@@ -257,6 +257,109 @@ pass `-v` for per-cycle detail.
 
 ---
 
+## Script reference
+
+Every runnable script, what it's for, and its flags. Run all from the `Server/`
+directory; each also takes `-h/--help`.
+
+### `bme690_receiver.py` — capture sensor data to CSV
+
+Initialises the 8 sensors, programs the heater profile + duty cycle from a
+`.bmeconfig`, and streams one CSV row per (sensor, heater step). The data source
+everything else consumes.
+
+```bash
+python bme690_receiver.py --check                    # probe hardware, print a summary, no capture
+python bme690_receiver.py                             # capture → data/bme690_receiver_<ts>.csv
+python bme690_receiver.py --config my.bmeconfig -o run.csv
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--check` | off | Open board, init sensors, print a summary, exit. Run before a real capture to verify wiring. |
+| `--config <file>` | newest `*.bmeconfig` in cwd | Heater profile + duty cycle to program. |
+| `-o, --output <file>` | `data/bme690_receiver_<ts>.csv` | CSV output path. |
+
+`Ctrl+C` stops cleanly; the CSV is flushed per row.
+
+### `bme690_viz.py` — live 8-panel plot
+
+Tails the newest capture CSV (no IPC with the receiver — pure file-tail) and
+draws gas resistance per sensor, one line per heater step. Run in a second
+terminal alongside the receiver.
+
+```bash
+python bme690_viz.py                                 # tail newest data/bme690_receiver_*.csv
+python bme690_viz.py --file run.csv --window 120
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--file <csv>` | newest capture | Tail a specific CSV instead of auto-discovering. |
+| `--window <s>` | 60 | Seconds of history shown per sensor. |
+| `--refresh-ms <ms>` | 500 | Redraw interval. |
+| `-v, --verbose` | off | Tail diagnostics to stderr. |
+
+### `ws_publisher.py` — WebSocket server + publisher
+
+The piece the HoloLens connects to. Each tick it asks the ML for an inference
+and broadcasts the §3 packet to all clients on `ws://<host>:<port>`. Pick **one**
+data source — the default (no flags) spawns `bme690_receiver.py` and live-tails
+it.
+
+```bash
+python ws_publisher.py                               # default: spawn receiver + tail + serve (needs hardware)
+python ws_publisher.py --dummy                        # simulated waveform, no model/hardware (transport test)
+python ws_publisher.py --replay-csv ../ML/data/raw/x.csv --replay-speed 4
+python ws_publisher.py --live-tail                    # tail a receiver already running elsewhere
+python ws_publisher.py --once                         # print one packet to stdout and exit
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--dummy` | off | `DummyEstimator` (simulated) — no models or hardware needed. |
+| `--replay-csv <path>` | — | Replay a captured CSV through the real model at real pace. |
+| `--replay-speed <x>` | 1.0 | Replay speed multiplier. |
+| `--live-tail` | off | Tail an already-running receiver instead of spawning one. |
+| `--no-auto-receiver` | off | Spawn/tail nothing — estimator stays idle (transport-only). |
+| `--host` / `--port` | `0.0.0.0` / `8765` | Bind address / port. |
+| `--rate <hz>` | 5.0 | Packets per second. |
+| `--once` | off | Emit one packet to stdout and exit (no server). |
+| `--bmeconfig <file>` | `Sample.bmeconfig` | Identifies HP354 sensors; passed to the auto-spawned receiver. |
+| `-v, --verbose` | off | Per-packet + per-cycle detail. |
+
+`--dummy`, `--replay-csv`, `--live-tail`, and `--no-auto-receiver` are mutually
+exclusive.
+
+### `bmeconfig_to_profile.py` — inspect / convert a `.bmeconfig`
+
+A helper, not part of the live path. Parses a `.bmeconfig` and (with `--print`)
+shows a human-readable heater-profile breakdown.
+
+```bash
+python bmeconfig_to_profile.py Sample.bmeconfig --print
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--print` | off | Print the parsed profile (steps, temps, cycle time). |
+| `-o, --output <file>` | derived from input | Also emit a Python module of the profile. |
+| `--profile-index <n>` | 0 | Which `heaterProfile` to summarise. |
+| `--divisor <x>` | 1.0 | `timeBase*multiplier / divisor` = step ms. |
+
+### `real_ml.py` / `dummy_ml.py` — inference (imported, not run directly)
+
+Libraries used *by* `ws_publisher.py`, not standalone tools:
+
+- **`real_ml.py`** — `RealEstimator` (loads `models/`, classify-then-regress with
+  the strength gate) plus `replay_into` / `LiveCycleFeeder` (the CSV feeds).
+  Exercised via `ws_publisher.py` (default or `--replay-csv`).
+- **`dummy_ml.py`** — the `Estimator` interface + `DummyEstimator`. Exercised via
+  `ws_publisher.py --dummy`. Running it directly (`python dummy_ml.py`) prints a
+  few seconds of simulated inferences as a sanity check.
+
+---
+
 ## Troubleshooting
 
 ### `ERROR: the coinespy package is not installed`
