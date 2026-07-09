@@ -11,9 +11,10 @@ far has label_tag == 0 throughout (buttons unused) — but plotting the raw
 signal (see ML/data/diagnostics/*.png) shows the phase structure is very much
 *present in the curve shape itself*: every run traces baseline (wide, stable,
 high resistance) -> rise -> plateau (wide, stable, low resistance) -> decay,
-with impressively consistent timing across all 9 captures regardless of
-odour. `detect_phases` recovers that structure directly from the curve
-instead of relying on tags that were never populated.
+with consistent timing across the 12 captures regardless of odour (the 3
+newer "v2" lemon runs extend the recovery tail with a longer decay).
+`detect_phases` recovers that structure directly from the curve instead of
+relying on tags that were never populated.
 
 Resistance/strength direction is inverted from what the phase names
 suggest: BME690 (MOx) resistance drops under exposure to reducing-gas VOCs
@@ -129,35 +130,50 @@ def detect_phases(values: np.ndarray, tol_fraction: float = 0.1) -> PhaseSegment
     value_range = values.max() - values.min()
     tol = tol_fraction * value_range if value_range > 0 else 0.0
 
-    peak_idx = int(np.argmax(values))
-    high_mask = values >= (values[peak_idx] - tol)
-    lo, hi = peak_idx, peak_idx
-    while lo > 0 and high_mask[lo - 1]:
-        lo -= 1
-    while hi < n - 1 and high_mask[hi + 1]:
-        hi += 1
-    baseline = slice(lo, hi + 1)
-
-    tail_start = hi + 1
-    if tail_start >= n:
-        # plateau runs to the end of the file — no decay/exposure observed at all
-        empty = slice(tail_start, tail_start)
-        return PhaseSegments(warmup=slice(0, lo), baseline=baseline,
-                              rise=empty, plateau=empty, decay=empty)
-
-    trough_idx = tail_start + int(np.argmin(values[tail_start:]))
+    # Anchor the exposure trough on the maximum DRAWDOWN below the running
+    # maximum (cummax - value), not the global minimum. Two shapes seen on real
+    # captures break a global-extremum anchor, both visible in the longer-decay
+    # "v2" lemon runs:
+    #   * the sensor's cold-start WARMUP can read lower than peak exposure, so
+    #     the global minimum is the warmup, not the exposure trough;
+    #   * a long recovery/decay tail can climb back ABOVE the pre-exposure
+    #     baseline, so the global maximum is the tail, not the baseline — which
+    #     silently mislabelled whole runs (exposure tagged "warmup", no
+    #     rise/plateau/decay at all).
+    # Drawdown peaks at the exposure trough regardless of how low the warmup
+    # dips (its running max is still small there) or how high the tail climbs.
+    drawdown = np.maximum.accumulate(values) - values
+    trough_idx = int(np.argmax(drawdown))
     low_mask = values <= (values[trough_idx] + tol)
     t_lo, t_hi = trough_idx, trough_idx
-    while t_lo > tail_start and low_mask[t_lo - 1]:
+    while t_lo > 0 and low_mask[t_lo - 1]:
         t_lo -= 1
     while t_hi < n - 1 and low_mask[t_hi + 1]:
         t_hi += 1
     plateau = slice(t_lo, t_hi + 1)
 
+    # Baseline = widest stable high region BEFORE the trough (pre-exposure clean
+    # air). Restricting the search to [0, t_lo) keeps the recovery tail out of
+    # the baseline even when that tail is the global maximum.
+    pre = values[:t_lo]
+    if len(pre) == 0:
+        # trough at the very start — no pre-exposure baseline captured
+        empty = slice(0, 0)
+        return PhaseSegments(warmup=empty, baseline=empty, rise=empty,
+                             plateau=plateau, decay=slice(t_hi + 1, n))
+    peak_idx = int(np.argmax(pre))
+    high_mask = pre >= (pre[peak_idx] - tol)
+    lo, hi = peak_idx, peak_idx
+    while lo > 0 and high_mask[lo - 1]:
+        lo -= 1
+    while hi < len(pre) - 1 and high_mask[hi + 1]:
+        hi += 1
+    baseline = slice(lo, hi + 1)
+
     return PhaseSegments(
         warmup=slice(0, lo),
         baseline=baseline,
-        rise=slice(tail_start, t_lo),
+        rise=slice(hi + 1, t_lo),
         plateau=plateau,
         decay=slice(t_hi + 1, n),
     )
@@ -167,9 +183,25 @@ def label_run_by_shape(
     cycle_timestamps: pd.Series, values: np.ndarray, min_segment_cycles: int = 4
 ) -> tuple[np.ndarray, np.ndarray, list[dict]]:
     """Full Stage 3 pipeline for one (run, sensor): detect phases from curve
-    shape, then label every cycle. Returns (phase, y_conc, fit_diagnostics).
-    `phase[i] == 'warmup'` or a fit-too-short segment leaves y_conc[i] = NaN —
-    callers should drop NaN y_conc rows before windowing for regression."""
+    shape, then label every cycle's strength. Returns (phase, y_conc,
+    fit_diagnostics).
+
+    Strength is read off LINEARLY between the two observed, stable levels the
+    rise spans — the clean-air baseline (strength 0) and the peak-exposure
+    plateau (strength 1): each cycle's strength is where its mean log-resistance
+    sits between those levels, clipped to [0, 1]. This replaces the per-segment
+    exponential fit as the LABEL source. That fit extrapolated the decay
+    asymptote whenever a capture ended before the sensor recovered (the
+    `asymptote_unreliable` fits), distorting exactly the low-strength tail we
+    care about; anchoring to the actually-observed baseline level is
+    extrapolation-free and measurably improved both the decay labels and the
+    strength regressor (LORO R^2 0.83 -> 0.89 — see ML/EXPERIMENTS.md).
+
+    Only `phase == 'warmup'` cycles (and degenerate runs with no detectable
+    baseline or plateau) are left y_conc = NaN — callers drop those before
+    windowing. The rise/decay exponential fits are still computed but now ONLY
+    for diagnostics (tau = recovery time constant, R^2, and the
+    `asymptote_unreliable` flag); they no longer set the label."""
     seg = detect_phases(values)
     n = len(values)
     phase = np.full(n, "warmup", dtype=object)
@@ -177,16 +209,24 @@ def label_run_by_shape(
     fits = []
 
     phase[seg.baseline] = "baseline"
-    y_conc[seg.baseline] = 0.0
+    phase[seg.rise] = "rise"
     phase[seg.plateau] = "plateau"
-    y_conc[seg.plateau] = 1.0
+    phase[seg.decay] = "decay"
 
-    for name, sl, conc_t0, conc_inf in [
-        ("rise", seg.rise, 0.0, 1.0),
-        ("decay", seg.decay, 1.0, 0.0),
-    ]:
+    # Rise-anchored linear labels: read strength off between the observed
+    # baseline and plateau levels (the stable regions the rise connects), for
+    # every non-warmup cycle at once. Warmup stays NaN — its low log-resistance
+    # is the cold-start transient, not exposure, so it must not read as strength.
+    base_vals, plat_vals = values[seg.baseline], values[seg.plateau]
+    baseline_level = float(base_vals.mean()) if base_vals.size else np.nan
+    plateau_level = float(plat_vals.mean()) if plat_vals.size else np.nan
+    span = baseline_level - plateau_level
+    if np.isfinite(span) and span > 1e-6:
+        non_warmup = phase != "warmup"
+        y_conc[non_warmup] = np.clip((baseline_level - values[non_warmup]) / span, 0.0, 1.0)
+
+    for name, sl in [("rise", seg.rise), ("decay", seg.decay)]:
         idx = np.arange(n)[sl]
-        phase[sl] = name
         if len(idx) < min_segment_cycles:
             if len(idx):
                 fits.append({"phase": name, "n_cycles": len(idx), "skipped": "too short to fit"})
@@ -197,12 +237,11 @@ def label_run_by_shape(
         except RuntimeError as e:
             fits.append({"phase": name, "n_cycles": len(idx), "error": str(e)})
             continue
-        y_conc[idx] = concentration_from_fit(values[idx], fit, conc_t0, conc_inf)
         duration_s = (seg_ts.iloc[-1] - seg_ts.iloc[0]).total_seconds()
         # tau >> the observed segment duration means the exponential barely
-        # curves within what we actually saw — the fitted asymptote (and so
-        # the y_conc values derived from it) is an extrapolation, not an
-        # observation. Flag it rather than silently trusting it.
+        # curves within what we saw, so its asymptote is extrapolated. This no
+        # longer affects the label (now level-based), but it's still a useful
+        # "the capture ended before the sensor levelled off" diagnostic flag.
         asymptote_unreliable = duration_s > 0 and fit.tau > 3 * duration_s
         fits.append({
             "phase": name, "r_squared": fit.r_squared, "tau_s": fit.tau,

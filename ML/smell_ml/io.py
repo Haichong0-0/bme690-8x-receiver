@@ -3,13 +3,17 @@
 Filename convention observed in data/raw/ (not documented anywhere,
 reverse-engineered from the real captures):
 
-    bme690_receiver_<YYYYMMDD>_<HHMMSS>_<odour><conc>.csv
+    bme690_receiver_<YYYYMMDD>_<HHMMSS>_<odour><conc>[<variant>].csv
     e.g. bme690_receiver_20260625_172513_lemon0.6.csv
+         bme690_receiver_20260709_110002_lemon0.6v2.csv   (optional variant tag)
 
 `<odour>` is whatever alpha string appears (lemon, grapefruit, sorange, ...) —
 this pipeline does NOT hard-code plan.md's odour set (lemon/grapefruit/lavender)
 because the real captures don't match it exactly (sorange, not lavender, has
-been captured so far). See ML/README.md.
+been captured so far). An optional trailing `<variant>` tag (alphanumeric, e.g.
+"v2" for the longer-decay capture protocol) is allowed after the concentration
+and folded into run_id so variant runs stay distinct LORO groups. See
+ML/README.md.
 """
 from __future__ import annotations
 
@@ -21,7 +25,8 @@ from typing import List
 import pandas as pd
 
 FILENAME_RE = re.compile(
-    r"^bme690_receiver_(?P<ts>\d{8}_\d{6})_(?P<odour>[A-Za-z]+)(?P<conc>[\d.]+)\.csv$"
+    r"^bme690_receiver_(?P<ts>\d{8}_\d{6})_(?P<odour>[A-Za-z]+)"
+    r"(?P<conc>\d+(?:\.\d+)?)(?P<variant>[A-Za-z0-9]*)\.csv$"
 )
 
 RAW_COLUMNS = [
@@ -47,8 +52,14 @@ def parse_run_meta(csv_path: Path) -> RunMeta:
             f"{csv_path.name!r} doesn't match the expected "
             f"bme690_receiver_<ts>_<odour><conc>.csv naming convention"
         )
+    run_id = f"{m['odour']}_{m['ts']}"
+    if m["variant"]:
+        # An optional capture-protocol tag (e.g. "v2" for the longer-decay
+        # runs). Fold it into run_id so a variant run stays a distinct LORO
+        # group and can't collide with a same-timestamp base capture.
+        run_id += f"_{m['variant']}"
     return RunMeta(
-        run_id=f"{m['odour']}_{m['ts']}",
+        run_id=run_id,
         odour=m["odour"],
         session_conc=float(m["conc"]),
         source_path=csv_path,

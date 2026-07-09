@@ -248,8 +248,9 @@ def _save_training_dataset(
               f"before trusting those y_conc labels. **")
     if len(unreliable):
         print(f"** NOTE: {len(unreliable)} decay/rise fits have tau >> the observed segment "
-              f"duration — the capture didn't run long enough to see the curve level off, so "
-              f"the fitted asymptote (and y_conc from it) is extrapolated. See run_fits.csv. **")
+              f"duration — the capture ended before the curve levelled off. This is now "
+              f"DIAGNOSTIC ONLY: y_conc is read off the observed baseline/plateau levels, not the "
+              f"fitted asymptote, so these labels are not extrapolated. See run_fits.csv. **")
     return meta_out
 
 
