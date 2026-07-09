@@ -32,9 +32,14 @@ training used information a live stream doesn't have yet:
      regressor's predicted strength is a causal proxy for "is an odour
      present now", so when it's below `strength_gate` (default 0.6) the odour
      confidence is forced to 0 — the classifier's output is only trusted on
-     the near-plateau cycles it was trained on. A fuller fix (retrain the
-     classifier on all phases plus an explicit no-odour class, or on
-     shape-normalised cycle windows) is noted in ML/EXPERIMENTS.md.
+     the near-plateau cycles it was trained on. UPDATE: the "fuller fix" this
+     anticipated is now the deployed default — the 4-class **"detect"**
+     classifier (ML/train.py --classifier-phase-filter detect) has an explicit
+     clean-air **"none"** class and trains the odour classes across a
+     concentration range, so it rejects clean air itself and identifies odour
+     below the plateau. When a none-class model is loaded, `infer()` reports the
+     best non-none odour and the strength gate drops to a low backstop (0.15).
+     The description above is retained for the legacy plateau-only model.
 
 The regression side has no such mismatch: `windowing.py`'s "last N cycles,
 label = the most recent cycle's y_conc" was already a causal design, so
@@ -74,13 +79,22 @@ HP354_ID_SUBSTRING = "354"
 # inference (and logged) rather than silently averaged in on stale data —
 # real cycles land every ~8-11s on real captures, so this is a generous margin.
 DEFAULT_STALE_TIMEOUT_S = 60.0
-# Below this predicted strength, the odour label is suppressed (confidence
-# forced to 0) — see the strength gate in `infer()` and docstring mismatch #2.
-# Pooled over the training runs, classification accuracy is only 0.33 below
-# strength 0.2 (clean air is systematically mislabelled) vs 0.68 above 0.6 and
-# 0.71 above 0.8, so 0.6 keeps the trustworthy near-plateau cycles while
-# dropping the clean-air/transition cycles that cause live confusion.
+# The classifier can carry a dedicated clean-air "none" class (the 4-class
+# "detect" model, ML/train.py --classifier-phase-filter detect). When it does,
+# it rejects no-odour itself, so the strength gate is only a light backstop.
+NONE_LABEL = "none"
+# Strength gate: below this predicted strength the odour label is suppressed
+# (confidence forced to 0) so the XR visual shows "no smell" instead of a bogus
+# odour. Two regimes:
+#   * Legacy PLATEAU-only classifier (no "none" class): it emits confident-but-
+#     meaningless labels on low-strength cycles (clean air read as grapefruit
+#     ~100% of the time), so the gate is the PRIMARY clean-air guard -> 0.6.
+#   * DETECT classifier (has a "none" class): the model rejects clean air
+#     itself, and a high gate would defeat the point (identifying odour below
+#     the plateau), so the gate is a low backstop -> 0.15.
+# strength_gate=None (the default) auto-selects based on the loaded model.
 DEFAULT_STRENGTH_GATE = 0.6
+DEFAULT_STRENGTH_GATE_WITH_NONE = 0.15
 
 
 def hp354_sensor_indices(bmeconfig_path: Path = DEFAULT_BMECONFIG) -> List[int]:
@@ -112,7 +126,7 @@ class RealEstimator(Estimator):
         models_dir: Path = DEFAULT_MODELS_DIR,
         verbose: bool = False,
         stale_timeout_s: float = DEFAULT_STALE_TIMEOUT_S,
-        strength_gate: float = DEFAULT_STRENGTH_GATE,
+        strength_gate: Optional[float] = None,
     ) -> None:
         self.classifier = joblib.load(models_dir / "classifier.joblib")
         self.classifier_scaler = joblib.load(models_dir / "classifier_scaler.joblib")
@@ -124,6 +138,14 @@ class RealEstimator(Estimator):
         # the live path matches it exactly (see `_classifier_features`). Older
         # metadata predates this key -> raw 10 steps, the original default.
         self.classifier_features: str = meta.get("classifier_features", "raw")
+        # Does the classifier have a dedicated clean-air "none" class? If so it
+        # detects no-odour itself (see infer()) and the strength gate is only a
+        # low backstop; otherwise the gate is the primary clean-air guard.
+        self._classes = [str(c) for c in self.classifier.classes_]
+        self.has_none = NONE_LABEL in self._classes
+        if strength_gate is None:
+            strength_gate = (DEFAULT_STRENGTH_GATE_WITH_NONE if self.has_none
+                             else DEFAULT_STRENGTH_GATE)
         self.verbose = verbose
         self.stale_timeout_s = stale_timeout_s
         self.strength_gate = strength_gate
@@ -222,7 +244,17 @@ class RealEstimator(Estimator):
             clf_probs.append(self.classifier.predict_proba(scaled)[0])
         mean_proba = np.mean(clf_probs, axis=0)
         classes = self.classifier.classes_
-        best_idx = int(np.argmax(mean_proba))
+        if self.has_none:
+            # 4-class "detect" model: report the best *real* odour (never
+            # "none") and use P(that odour) as the confidence. When "none"
+            # dominates (clean air, or too faint to identify) that probability
+            # is low, so the XR visual's confidence gate hides it — the
+            # classifier now does the no-odour detection the strength gate used
+            # to stand in for.
+            odour_idx = [i for i, c in enumerate(self._classes) if c != NONE_LABEL]
+            best_idx = odour_idx[int(np.argmax(mean_proba[odour_idx]))]
+        else:
+            best_idx = int(np.argmax(mean_proba))
         odour = str(classes[best_idx])
         confidence = float(mean_proba[best_idx])
 
@@ -239,14 +271,11 @@ class RealEstimator(Estimator):
             reg_preds.append(self.regressor.predict(scaled)[0])
         intensity = float(np.clip(np.mean(reg_preds), 0.0, 1.0))
 
-        # Strength gate (docstring mismatch #2). The classifier was trained
-        # only on plateau (peak-exposure) cycles; on low-strength cycles (clean
-        # air, ramp, decay) it emits confident-but-meaningless labels — pooled
-        # over training runs, accuracy is 0.33 below strength 0.2 (a lemon run's
-        # clean-air baseline reads as grapefruit ~100% of the time) vs 0.71
-        # above 0.8. So when the regressor says little odour is present, there
-        # is nothing to identify: zero the confidence so downstream (the XR
-        # visual's confidence gate) shows "no smell" rather than a bogus odour.
+        # Strength gate: zero the confidence when the regressor says almost no
+        # odour is present, so the XR visual shows "no smell" rather than a bogus
+        # odour. For a "detect" classifier this is a low backstop (0.15) behind
+        # the model's own "none" class; for a legacy plateau-only classifier it
+        # is the primary clean-air guard (0.6). See DEFAULT_STRENGTH_GATE.
         gated = intensity < self.strength_gate
         if gated:
             confidence = 0.0

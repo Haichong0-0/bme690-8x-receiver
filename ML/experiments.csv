@@ -22,3 +22,5 @@ exp_id,timestamp,lowpass_filter_applied,window_size_cycles,classifier_phase_filt
 21,2026-07-05T17:09:35Z,True,3,plateau,rf,temp_contrast,rf,7736,6840,0.6843,0.4719,0.0687,0.1177,0.8718,"temp-contrast study (deep-research rec #2): raw 10 steps + cross-temperature contrast features, rf"
 22,2026-07-05T17:10:04Z,True,3,plateau,svm,temp_contrast,rf,7736,6840,0.797,0.5751,0.0687,0.1177,0.8718,"temp-contrast study (deep-research rec #2): raw 10 steps + cross-temperature contrast features, svm"
 23,2026-07-06T15:59:13Z,True,3,plateau,logreg,raw_gradient,rf,7736,6840,0.7989,0.5429,0.0687,0.1177,0.8718,"raw+gradient (step-diff shape) features; sweep winner, near-eliminates lemon misclassification"
+24,2026-07-09T12:32:19Z,True,3,detect,svm,raw_gradient,rf,10785,9531,0.8164,0.5343,0.0806,0.1375,0.8282,"4-class detect (none+odours, T=0.4) svm for low-conc odour ID; regressor retrained on 12 runs incl v2 long-decay lemon"
+25,2026-07-09T13:14:56Z,True,3,detect,svm,raw_gradient,rf,10785,9549,0.8366,0.5354,0.0671,0.1033,0.891,rise-anchored linear strength labels (extrapolation-free decay); detect svm; 12 runs

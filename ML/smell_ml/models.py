@@ -29,7 +29,12 @@ CLASSIFIER_FACTORIES = {
     "rf": lambda seed: RandomForestClassifier(
         n_estimators=300, class_weight="balanced", random_state=seed, n_jobs=-1),
     "gb": lambda seed: GradientBoostingClassifier(n_estimators=200, random_state=seed),
-    "svm": lambda seed: SVC(kernel="rbf", C=1.0, class_weight="balanced", random_state=seed),
+    # probability=True so predict_proba works: real_ml.py averages predict_proba
+    # across the 4 sensors, and SVM is the deployed 'detect' classifier (it won
+    # the low-concentration eval). Adds an internal CV for Platt scaling, so
+    # training is a little slower.
+    "svm": lambda seed: SVC(kernel="rbf", C=1.0, class_weight="balanced",
+                            probability=True, random_state=seed),
     "logreg": lambda seed: LogisticRegression(max_iter=2000, class_weight="balanced", random_state=seed),
     "knn": lambda seed: KNeighborsClassifier(n_neighbors=5),
 }

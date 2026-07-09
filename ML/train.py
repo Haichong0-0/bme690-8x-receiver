@@ -50,6 +50,11 @@ EXPERIMENTS_PENDING = THIS_DIR / "experiments.pending.jsonl"
 CLASSIFIER_HIGH_CONC_THRESHOLD = 0.5
 STEP_COLS = [f"step_{i}" for i in range(10)]
 
+# "detect" (low-concentration) classifier config: a clean-air "none" class plus
+# odour classes trained on cycles at or above this relative strength.
+NONE_LABEL = "none"
+DEFAULT_ODOUR_CONC_THRESHOLD = 0.4
+
 # Heater-step -> temperature grouping, confirmed from data/raw (target_c per
 # step): 100C = steps 1,2,3 | 200C = steps 4,5,6 | 320C = steps 0,7,8,9.
 TEMP_GROUPS = {100: [1, 2, 3], 200: [4, 5, 6], 320: [0, 7, 8, 9]}
@@ -181,7 +186,9 @@ def log_experiment(row: dict) -> None:
     _write_experiments_md(updated)
 
 
-def load_classification_data(phase_filter: str, features: str = "raw") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def load_classification_data(phase_filter: str, features: str = "raw",
+                             odour_conc_threshold: float = DEFAULT_ODOUR_CONC_THRESHOLD,
+                             ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Classifier features per cycle. `features`:
       - "raw": the 10 per-step log-resistance values (the original default).
       - "temp_contrast": the 10 raw steps PLUS the temperature-contrast
@@ -211,16 +218,32 @@ def load_classification_data(phase_filter: str, features: str = "raw") -> tuple[
     with those two sharing similar dominant citrus terpenes."""
     df = pd.read_csv(PROCESSED_DIR / "cycle_dataset.csv")
     if phase_filter == "plateau":
-        subset = df[df["phase"] == "plateau"]
+        subset = df[df["phase"] == "plateau"].copy()
     elif phase_filter == "high_conc":
-        subset = df[df["y_conc"] >= CLASSIFIER_HIGH_CONC_THRESHOLD]
+        subset = df[df["y_conc"] >= CLASSIFIER_HIGH_CONC_THRESHOLD].copy()
+    elif phase_filter == "detect":
+        # Low-concentration classifier: 4 classes {none, lemon, grapefruit,
+        # sorange}. "none" = clean-air baseline cycles; the odour classes = every
+        # cycle with y_conc >= odour_conc_threshold, which spans rise/plateau/
+        # decay (a concentration RANGE, not just the plateau) — that range is what
+        # teaches each odour's fingerprint BELOW full strength. The faint
+        # transition band (0 < y_conc < threshold) is dropped so it doesn't blur
+        # the none/odour boundary. Fixes both plateau-only failures at low
+        # concentration: it can output "none" for clean air instead of a forced
+        # (bogus) odour, and it learns identity across concentrations, not just at
+        # the plateau. (Eval: SVM won this decisively over logreg — see EXPERIMENTS.)
+        none = df[df["phase"] == "baseline"].copy()
+        none["odour"] = NONE_LABEL
+        odour = df[df["y_conc"] >= odour_conc_threshold].copy()
+        subset = pd.concat([none, odour], ignore_index=True)
     else:
         raise ValueError(f"unknown phase_filter {phase_filter!r}")
     steps = subset[STEP_COLS].to_numpy(dtype=np.float32)
     X = build_classifier_features(steps, features)
     y = subset["odour"].to_numpy()
     run_id = subset["run_id"].to_numpy()
-    return X, y, run_id
+    y_conc = subset["y_conc"].to_numpy(dtype=np.float32)
+    return X, y, run_id, y_conc
 
 
 def load_regression_data() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -243,8 +266,17 @@ def _print_loro(label: str, result: models.LOROResult, extra_keys: list[str]) ->
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--classifier-phase-filter", choices=["plateau", "high_conc"], default=None,
-                     help="which cycles train the classifier; default: try both, keep the better LORO accuracy")
+    ap.add_argument("--classifier-phase-filter", choices=["plateau", "high_conc", "detect"], default=None,
+                     help="which cycles train the classifier. plateau/high_conc: the original 3-class "
+                          "{lemon,grapefruit,sorange} on peak-exposure cycles (default: try both, keep the "
+                          "better LORO accuracy). detect: the 4-class low-concentration classifier "
+                          "{none,lemon,grapefruit,sorange} -- a clean-air 'none' class + odour classes "
+                          "trained across a concentration range (see load_classification_data). Deploy "
+                          "detect with --classifier-algo svm (won the low-concentration eval).")
+    ap.add_argument("--odour-conc-threshold", type=float, default=DEFAULT_ODOUR_CONC_THRESHOLD,
+                     help="for --classifier-phase-filter detect: min y_conc for a cycle to carry its odour "
+                          f"label (below it, only baseline cycles feed the 'none' class). default "
+                          f"{DEFAULT_ODOUR_CONC_THRESHOLD}")
     ap.add_argument("--classifier-algo", choices=list(models.CLASSIFIER_FACTORIES), default="logreg",
                      help="default: logreg -- won the algorithm sweep (ML/EXPERIMENTS.md), "
                           "0.746-0.755 LORO accuracy vs rf's 0.581-0.611")
@@ -276,7 +308,8 @@ def main() -> int:
     filters_to_try = [args.classifier_phase_filter] if args.classifier_phase_filter else ["plateau", "high_conc"]
     best = None  # (filter_name, LOROResult, X, y, run_id)
     for f in filters_to_try:
-        X, y, run_id = load_classification_data(f, features=args.classifier_features)
+        X, y, run_id, _ = load_classification_data(
+            f, features=args.classifier_features, odour_conc_threshold=args.odour_conc_threshold)
         result = models.evaluate_classifier_loro(X, y, run_id, algo=args.classifier_algo, seed=args.seed)
         _print_loro(f"classifier [{f}/{args.classifier_algo}/{args.classifier_features}] "
                     f"(n={len(y)}, dim={X.shape[1]})", result, ["accuracy", "f1_macro"])
@@ -307,9 +340,12 @@ def main() -> int:
     joblib.dump(reg_scaler, args.models_dir / "regressor_scaler.joblib")
 
     proc_meta = json.loads((PROCESSED_DIR / "meta.json").read_text())
+    clf_classes = sorted(set(clf_y.tolist()))
     metadata = {
-        "odours": sorted(set(clf_y.tolist())),
+        "classifier_classes": clf_classes,
+        "odours": [c for c in clf_classes if c != NONE_LABEL],
         "classifier_phase_filter": clf_filter,
+        "odour_conc_threshold": args.odour_conc_threshold if clf_filter == "detect" else None,
         "classifier_algo": args.classifier_algo,
         "classifier_features": args.classifier_features,
         "regressor_algo": args.regressor_algo,
