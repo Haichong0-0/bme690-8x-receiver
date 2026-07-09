@@ -61,9 +61,21 @@ firmware. Streams CSV matching BME AI-Studio's `.bmerawdata` schema.
   (copied from `ML/models/`, produced by `ML/train.py`) and turns buffered
   sensor cycles into an `Inference` (see `ML/EXPERIMENTS.md` for the
   classifier/regressor algorithm + preprocessing sweep that picked them:
-  logistic-regression classifier on `raw_gradient` features — the 10
-  log-resistance steps plus their 9 step-to-step gradients, the temperature-
-  sweep shape — RandomForest regressor, 3-cycle window; LORO accuracy 0.799).
+  a **4-class SVM** (rbf, `probability=True`) classifier on `raw_gradient`
+  features — the 10 log-resistance steps plus their 9 step-to-step gradients,
+  the temperature-sweep shape — and a RandomForest regressor, 3-cycle window;
+  LORO classifier accuracy 0.837). The classifier runs in **"detect"** mode
+  (`train.py --classifier-phase-filter detect --classifier-algo svm`): a
+  dedicated clean-air **"none"** class (baseline cycles) alongside the three
+  odour classes {lemon, grapefruit, sorange}, and the odour classes are trained
+  across a concentration *range* (cycles with `y_conc ≥ 0.4`, spanning
+  rise/plateau/decay — not just the plateau). So the model rejects clean air
+  itself (labels it "none" 97% of the time, up from 0%) and identifies an odour
+  before it reaches the plateau — the low-concentration fix that replaced the
+  old plateau-only logistic-regression classifier. The regressor's targets are
+  now **rise-anchored linear strength labels** (`y_conc` read off linearly
+  between the observed baseline (0) and plateau (1) rather than a per-segment
+  exponential fit), lifting it to LORO R² 0.891 / MAE 0.067 (from R² 0.828).
   `real_ml.py` reads `classifier_features` from `metadata.json` and applies
   the matching transform live (`_classifier_features`), so the serving path
   stays in sync with whatever `train.py` deployed.
@@ -73,14 +85,18 @@ firmware. Streams CSV matching BME AI-Studio's `.bmerawdata` schema.
   extraction) so `Server/` stays deployable on its own — see the module
   docstring for the two documented train/serve mismatches (no Stage-1
   low-pass filtering, no phase-aware cycle selection for the classifier).
-  The second mismatch caused live lemon↔grapefruit confusion (clean-air
-  cycles, which carry no odour identity, were classified grapefruit ~100% of
-  the time) and is now mitigated by a **strength gate** (`DEFAULT_STRENGTH_GATE`
-  = 0.6): the odour label is suppressed when the regressor's predicted strength
-  is low, so the classifier is only trusted on the near-plateau cycles it was
-  trained on. Also provides `replay_into()` / `build_replay_events()`, which replay a
-  captured CSV's cycles into a `RealEstimator` at real pace, standing in for
-  live hardware.
+  `RealEstimator` **auto-detects the "none" class**: for the deployed detect
+  model it reports the best *real* odour (never "none") with P(that odour) as
+  `odour_confidence`, and drops the **strength gate** to a 0.15 backstop
+  (`DEFAULT_STRENGTH_GATE_WITH_NONE`) — the classifier now does the no-odour
+  detection the gate used to stand in for, so the earlier live lemon↔grapefruit
+  confusion (clean-air cycles classified grapefruit ~100% of the time) is
+  handled by the model, not the gate. Legacy plateau-only classifiers (no
+  "none" class) still fall back to the 0.6 gate (`DEFAULT_STRENGTH_GATE`) as
+  their primary clean-air guard. Wire contract unchanged — `odour` is always one
+  of {lemon, grapefruit, sorange}; "none" is host-side only. Also provides
+  `replay_into()` / `build_replay_events()`, which replay a captured CSV's
+  cycles into a `RealEstimator` at real pace, standing in for live hardware.
 - **`ws_publisher.py`** — Approach-A WebSocket **server** (runs *with* the
   detector). Calls the ML each tick and broadcasts the plan.md §3 JSON packet
   to all connected clients at a fixed rate. This is the "publisher + server" the

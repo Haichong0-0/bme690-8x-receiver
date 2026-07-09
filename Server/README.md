@@ -237,13 +237,24 @@ disconnects. Terminal output is just the packet stream plus abnormal events;
 pass `-v` for per-cycle detail.
 
 - **`real_ml.py`** — `RealEstimator`: loads the trained artifacts from
-  `models/` and turns buffered cycles into an inference. Classifier is a
-  logistic regression on `raw_gradient` features (the 10 log-resistance steps
-  plus their step-to-step gradients — the temperature-sweep shape); regressor
-  is a RandomForest predicting strength. A **strength gate** suppresses the
-  odour label when little odour is present (clean air), so the visual shows
-  nothing rather than a bogus odour. Reads `metadata.json`'s
-  `classifier_features` so the live features match whatever was trained.
+  `models/` and turns buffered cycles into an inference. The classifier is a
+  4-class **detect-mode SVM** over `{none, lemon, grapefruit, sorange}` — a
+  dedicated clean-air **`none`** class plus the three odours trained across a
+  concentration range, so it identifies an odour even at low concentration and
+  rejects clean air itself. It still runs on `raw_gradient` features (the 10
+  log-resistance steps plus their step-to-step gradients — the temperature-sweep
+  shape), read via `metadata.json`'s `classifier_features` so the live features
+  match training. `infer()` auto-detects the `none` class: it reports the best
+  **real** odour (never `none`) and uses P(that odour) as `odour_confidence`, so
+  clean-air or faint cycles come through with low confidence and the XR visual's
+  confidence gate hides them. The regressor is a RandomForest over a 3-cycle
+  window predicting 0→1 strength. The **strength gate** is now just a low
+  **0.15** backstop (`DEFAULT_STRENGTH_GATE_WITH_NONE`) when a `none`-class model
+  is loaded — the classifier does the primary no-odour detection now; a legacy
+  plateau-only classifier (no `none` class) still uses the old **0.6** gate, and
+  `strength_gate=None` (the default) auto-selects on the loaded model. On the
+  wire the odour is always one of `{lemon, grapefruit, sorange}` — `none` is a
+  host-side detail that only ever lowers confidence.
 - **`dummy_ml.py`** — the placeholder `Estimator` (`--dummy`), kept for
   transport testing without a model.
 - **`models/`** — the trained artifacts (`classifier.joblib`,
@@ -252,8 +263,9 @@ pass `-v` for per-cycle detail.
   boundary (see [`../CLAUDE.md`](../CLAUDE.md) and [`../ML/README.md`](../ML/README.md)).
 
 > Models are trained offline in [`../ML/`](../ML/) and copied here. To retrain
-> and redeploy: `python ../ML/train.py [flags]`, then copy `ML/models/*` into
-> `Server/models/`.
+> and redeploy the deployed detect-SVM classifier:
+> `python ../ML/train.py --classifier-phase-filter detect --classifier-algo svm`,
+> then copy `ML/models/*` into `Server/models/`.
 
 ---
 

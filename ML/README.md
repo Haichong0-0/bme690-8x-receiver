@@ -33,8 +33,11 @@ Writes to `data/processed/`:
   string, `run_id` `[n]` string, `sensor_id` `[n]` int, plus `trend_slope` /
   `trend_diff_last` engineered dynamics features per window.
 - **`run_fits.csv`** — one row per (run, sensor, rise-or-decay segment):
-  `tau_s, r_squared, n_cycles, duration_s, asymptote_unreliable`. Check this
-  (and the PNGs below) before trusting the labels.
+  `tau_s, r_squared, n_cycles, duration_s, asymptote_unreliable`. These
+  exponential fits are now **diagnostic-only** (the `y_conc` labels are read off
+  the observed baseline/plateau levels, not the fit — see Stage 3 below); check
+  this (and the PNGs below) to spot captures that ended before the sensor
+  recovered.
 - **`meta.json`** — pipeline-wide summary: odours discovered, cycle counts by
   phase, low-R² / unreliable-asymptote counts, imputation rate.
 - **`data/diagnostics/*.png`** (one per run×sensor) — the cleaned curve
@@ -60,7 +63,7 @@ explained), see [`PREPROCESSING.md`](PREPROCESSING.md).
 | `grid.py` | 2a/2b | HP354 sensor selection, true cycle-boundary detection, (cycle × step) grid |
 | `clean.py` | 1 | Impute, low-pass filter (on by default), log-transform, per (sensor, step) channel |
 | `align.py` | 2c | Optional spline (linear, log-space) step-offset alignment |
-| `labels.py` | 3 | Automatic phase detection from curve shape + per-segment exponential fit → `y_conc` |
+| `labels.py` | 3 | Automatic phase detection from curve shape → rise-anchored linear `y_conc` (per-segment exponential fit still computed, now diagnostic-only) |
 | `windowing.py` | 4 | Sliding windows over cycles, per sensor |
 | `scaling.py` | 5 | z-score `WindowScaler`, fit-on-train-only |
 | `split.py` | 6 | Group-aware split / leave-one-run-out, `group=run_id` |
@@ -119,15 +122,16 @@ and writes `models/` (`classifier.joblib`, `regressor.joblib`, scalers,
 `build_dataset.py` first.
 
 ```bash
-python train.py                                  # deployed defaults (logreg + raw_gradient, rf)
-python train.py --classifier-algo svm --note "trying svm"
+python train.py --classifier-phase-filter detect --classifier-algo svm  # the deployed 4-class detect-SVM
+python train.py                                  # historical 3-class classifier (auto plateau/high_conc, logreg + raw_gradient), rf
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--classifier-algo {rf,gb,svm,logreg,knn}` | logreg | Classifier algorithm. |
+| `--classifier-algo {rf,gb,svm,logreg,knn}` | logreg | Classifier algorithm. The deployed detect classifier uses `svm` (its factory sets `probability=True` so `predict_proba` works at serving). |
 | `--classifier-features {raw,gradient,raw_gradient,temp_contrast}` | raw_gradient | Feature set — must match what `real_ml.py` will serve. |
-| `--classifier-phase-filter {plateau,high_conc}` | auto (tries both) | Which cycles train the classifier. |
+| `--classifier-phase-filter {plateau,high_conc,detect}` | auto (tries plateau/high_conc) | Which cycles train the classifier. `detect` is the deployed 4-class mode: a clean-air `none` class + odour classes trained across a concentration range (rise/plateau/decay). |
+| `--odour-conc-threshold <f>` | 0.4 | For `--classifier-phase-filter detect`: min `y_conc` for a cycle to carry its odour label (below it, only baseline cycles feed the `none` class). |
 | `--regressor-algo {rf,gb,ridge,svr,knn}` | rf | Regressor algorithm. |
 | `--models-dir` / `--seed` / `--note` | see `-h` | Output dir / RNG seed / experiments.csv note. |
 
@@ -172,14 +176,17 @@ python testing/test_capture.py path/to/bme690_receiver_<ts>.csv
 ## Training
 
 ```
-python train.py
+python train.py --classifier-phase-filter detect --classifier-algo svm
 ```
 
-Reads `data/processed/`, evaluates via leave-one-run-out (9 folds — every
+Reads `data/processed/`, evaluates via leave-one-run-out (12 folds — every
 capture held out once), then refits on all data and writes to `models/`:
 `classifier.joblib` + `classifier_scaler.joblib`, `regressor.joblib` +
 `regressor_scaler.joblib`, `metadata.json` (LORO metrics, confusion matrix,
-which cycle-phase filter the classifier used).
+which cycle-phase filter the classifier used). The bare `python train.py` still
+runs the historical 3-class classifier (auto plateau/high_conc, logreg); the
+deployed model in `models/` is the 4-class detect-SVM, so pass the two flags
+above to reproduce it.
 
 ### Evaluation plots
 
@@ -188,7 +195,7 @@ python evaluate.py                    # rf regressor (the deployed default)
 ```
 
 Overlays the strength regressor's **out-of-fold** predictions (each run
-predicted by a model trained on the other 8) onto each run's diagnostic curve:
+predicted by a model trained on the other 11) onto each run's diagnostic curve:
 dashed black = true strength, dotted green = predicted. (The strength label is
 the `y_conc` column in the processed data — same 0-1 value, just named
 "strength" in the human-facing wording to avoid implying absolute
@@ -210,10 +217,14 @@ you changed. Don't hand-edit `EXPERIMENTS.md`; it's regenerated from
 
 ### Algorithm + preprocessing sweep results
 
-23 experiments in `experiments.csv` / `EXPERIMENTS.md` — see there for the
-full table. Summary of what moved the numbers, each holding everything else
-fixed at the exp-2 baseline (lowpass off, window=5, `plateau` classifier
-cycles, RandomForest/RandomForest):
+25 experiments in `experiments.csv` / `EXPERIMENTS.md` — see there for the
+full table. The sweep below (exps 1–23) was run on the original **9-run**
+dataset and picked the 3-class classifier + regressor defaults; the
+**deployed** model (exps 24–25) has since moved to a 4-class detect-SVM on the
+**12-run** dataset — see "Deployed classifier + regressor" at the end of this
+section. Summary of what moved the numbers in the sweep, each holding
+everything else fixed at the exp-2 baseline (lowpass off, window=5, `plateau`
+classifier cycles, RandomForest/RandomForest):
 
 **Classifier algorithm** (regressor held at `rf`): **logreg 0.746** > svm
 0.688 > rf 0.581 (baseline) > gb 0.561 > knn 0.534. Logistic regression won
@@ -254,14 +265,11 @@ with L2 regularisation + per-feature standardisation the representation still
 matters (an *unregularised* linear model would gain nothing from it). See
 `train.load_classification_data` and `real_ml.py`'s docstring.
 
-**Best combined config** (exp 23: lowpass ON + window=3 + logreg + rf +
-`raw_gradient` features) beats every single-dimension winner: classifier
-**accuracy 0.799, f1_macro 0.543**; regressor **MAE 0.069, RMSE 0.118,
-R² 0.872**. This is what `data/processed/` and `models/` are currently built
-with.
-
-Confusion matrix for the best config (grapefruit↔sorange is now the whole
-error mode; lemon is cleanly separated):
+**Best combined 3-class config** (exp 23: lowpass ON + window=3 + logreg + rf +
+`raw_gradient` features) beat every single-dimension winner on the 9-run data:
+classifier **accuracy 0.799, f1_macro 0.543**; regressor **MAE 0.069,
+RMSE 0.118, R² 0.872**. Confusion matrix (grapefruit↔sorange was the whole
+error mode; lemon cleanly separated):
 
 ```
               predicted:
@@ -271,14 +279,50 @@ error mode; lemon is cleanly separated):
   sorange:        196        0      433
 ```
 
-Lemon is now near-perfect (747/749, up from 724/749 on raw features — the
-gradient features near-eliminated the lemon↔sorange leak raw had). The residual
-is entirely grapefruit↔sorange, both directions — plausibly the same underlying
-cause (shared dominant citrus terpenes). Likely next steps if it needs to go
-further: collect more repeats (3/odour is thin for any classifier), or — if
-`sorange` isn't actually in the live rotation (see the lavender-vs-sorange note
-below) — retrain a 2-class lemon-vs-grapefruit classifier and drop the hard
-pair entirely.
+Lemon was near-perfect (747/749, up from 724/749 on raw features — the gradient
+features near-eliminated the lemon↔sorange leak raw had). The residual was
+entirely grapefruit↔sorange, both directions — plausibly the same underlying
+cause (shared dominant citrus terpenes).
+
+#### Deployed classifier + regressor (what `models/` currently holds)
+
+The shipped model has since moved on from that 3-class config in two ways
+(exps 24–25, on the **12-run** dataset):
+
+1. **Classifier → 4-class "detect" SVM** (exp 24). The plateau-only 3-class
+   classifier had no way to say "clean air" and forced an odour label onto
+   every cycle — live, clean-air baseline cycles were classified `grapefruit`
+   ~100% of the time. The `detect` mode adds a clean-air **`none`** class
+   (baseline cycles) and trains the odour classes across a concentration
+   **range** (every cycle with `y_conc ≥ 0.4 = --odour-conc-threshold`, spanning
+   rise/plateau/decay, not just the plateau), so it learns each odour's
+   fingerprint *below* full strength. SVM (rbf, `probability=True`) won this
+   decisively over logreg. LORO **accuracy 0.837, f1_macro 0.535**, trained on
+   **7,747 cycles**. Clean air is now called `none` 97% of the time (2333/2401,
+   was 0%), and odours are identified below the plateau.
+
+2. **Rise-anchored linear strength labels** (exp 25, see Stage 3 below). Reading
+   `y_conc` off the observed baseline/plateau levels instead of the exponential
+   fit's extrapolated asymptote lifted the regressor from R² 0.828 → **0.891**
+   on the 12-run data (beating even the original 9-run 0.872): **MAE 0.067,
+   RMSE 0.103, R² 0.891**, trained on **9,549 windows**.
+
+Deployed confusion matrix (4-class detect-SVM, rows = true, cols = predicted;
+lemon is strong, grapefruit↔sorange is the residual confusion):
+
+```
+              predicted:
+              grapefruit  lemon  none  sorange
+  grapefruit:   1100        29     6     281
+       lemon:     46      2153   126     245
+        none:     18        50  2333       0
+     sorange:    381        67     3     909
+```
+
+Likely next steps if the odour pair needs to go further: collect more repeats
+(3/odour is still thin for grapefruit and sorange), or — if `sorange` isn't
+actually in the live rotation (see the lavender-vs-sorange note below) — drop
+`sorange` and retrain without the hard grapefruit↔sorange pair entirely.
 
 For reference, this is the exp-2 baseline confusion matrix (RandomForest,
 lowpass off, window=5) that motivated trying other algorithms in the first
@@ -319,12 +363,13 @@ why, in the order they were found:
 2. **`label_tag` (the collection board's phase-labelling buttons) is unused —
    always 0 — in every capture so far.** So Stage 2b/3's phase tags can't
    come from the tags. But the phase structure is very much *present in the
-   curve shape*: every one of the 9 real captures traces a near-identical
+   curve shape*: every one of the 12 real captures traces a near-identical
    warm-up → baseline (wide, stable, high resistance) → rise → plateau (wide,
-   stable, low resistance) → decay shape, with strikingly consistent timing
-   across all 9 runs regardless of odour (rise ~0-100s, baseline plateau
-   ~100-550s, transition ~550-700s, exposure plateau ~700-1250s, recovery
-   ~1250s to file end). `labels.detect_phases` recovers this directly from
+   stable, low resistance) → decay shape, with consistent timing across runs
+   regardless of odour (rise ~0-100s, baseline plateau ~100-550s, transition
+   ~550-700s, exposure plateau ~700-1250s, recovery ~1250s to file end) — the 3
+   newer lemon "v2" captures being the deliberate exception, running a longer
+   decay (see item 5). `labels.detect_phases` recovers this directly from
    the curve instead of relying on tags that were never populated. If a
    future capture actually populates `label_tag`, `process_run` in
    `build_dataset.py` will raise `NotImplementedError` rather than silently
@@ -347,16 +392,26 @@ why, in the order they were found:
    `window_dataset.npz` (windowing skips gaps in valid `y_conc` rather than
    bridging across them — see `_valid_blocks` in `build_dataset.py`).
 
-5. **Every run stops before the post-exposure recovery fully reaches
-   baseline.** The `decay` phase (the plan's actual strength-decay
-   sweep) is captured from 1250s to file end (1800s), but the curve is often
-   still climbing at that point. The exponential fit's asymptote is then an
-   extrapolation past what was actually observed — `run_fits.csv`'s
-   `asymptote_unreliable` column flags fits where `tau > 3x` the segment's
-   observed duration (a handful of the 72 rise/decay fits, e.g. some `sorange`
-   sensor-5 decays with `tau` in the millions of seconds). Those y_conc
-   values are real numbers but shakier than the rest — check the PNG before
-   trusting them.
+5. **Most runs stop before the post-exposure recovery fully reaches baseline —
+   the newer lemon "v2" captures much less so.** The `decay` phase (the plan's
+   actual strength-decay sweep) is captured from ~1250s to file end, but the
+   curve is often still climbing at that point. This *used to* distort the
+   labels: Stage 3 read strength off a per-segment exponential fit whose
+   asymptote was then an extrapolation past what was actually observed. Two
+   things fixed that:
+   - **The 3 new lemon "v2" runs extend the decay to ~35–36 min (~252–261
+     cycles) vs the older ~30 min (~216 cycles), so recovery reaches much closer
+     to baseline** — and their long recovery tail can even climb *above* the
+     pre-exposure baseline, which is why `labels.detect_phases` now anchors the
+     exposure trough on the maximum drawdown below the running max (cummax −
+     value) rather than the global min/max (a global-extremum anchor mislabelled
+     those v2 runs entirely, tagging the whole exposure as "warmup").
+   - **Stage 3 no longer labels from the fit at all** — `y_conc` is read
+     linearly between the observed baseline and plateau levels the rise spans
+     (extrapolation-free; see Stage 3 in the module map). The exponential fit is
+     still computed for diagnostics, and `run_fits.csv`'s `asymptote_unreliable`
+     column still flags fits where `tau > 3×` the segment's observed duration (8
+     such fits across the dataset), but those flags no longer affect any label.
 
 6. **The `.bmeconfig`'s `gas_wait` for `heater_354` step 3 silently saturates**
    (4200ms requested, 4032ms max — this is a real bug in
@@ -381,26 +436,28 @@ why, in the order they were found:
 | log-transform order | before filtering | Chosen empirically: the real decay/rise segments are close to linear in log-space (fits hit R² 0.96-1.0), which wouldn't hold filtering-then-logging raw resistance given the multi-order-of-magnitude swings between heater steps. |
 | Step-alignment (Stage 2c) | off (`align.JITTER_ABS_THRESHOLD_S = 0.3`s) | Measured real jitter is std ~0.05-0.09s against multi-second step spacings — confirmed negligible, not assumed. The spline path exists and is exercised for robustness but not currently triggered by any real run. |
 | Window size `N` | **3 cycles** (`windowing.DEFAULT_WINDOW`) | Swept 3/5/10/15: regressor R² is monotonically worse with larger windows (0.868/0.859/0.837/0.817) — the strength changes faster than a big window stays local to. 3 was the smallest tried and won; going smaller still is untested. |
-| Classifier algorithm | **logreg** (`--classifier-algo`) | Swept rf/gb/svm/logreg/knn: logistic regression won by a wide margin (0.746-0.755 vs rf's 0.581-0.611), plausibly because the classification task is closer to linearly separable in this feature space than tree ensembles can exploit with only ~700 examples/class. |
+| Classifier algorithm | **logreg** (`--classifier-algo`; deployed detect model uses **svm**) | Swept rf/gb/svm/logreg/knn on the 9-run 3-class task: logistic regression won by a wide margin (0.746-0.755 vs rf's 0.581-0.611), plausibly because that task is closer to linearly separable in this feature space than tree ensembles can exploit with only ~700 examples/class. On the 4-class `detect` task, SVM won instead — the shipped model is the detect-SVM. |
 | Classifier features | **raw_gradient** (`--classifier-features`) | Swept raw / gradient / raw_gradient / temp_contrast: `raw_gradient` (the 10 log-R steps + their 9 step-to-step gradients — the temperature-sweep shape) won at 0.799 vs raw's 0.755, and near-eliminated lemon misclassification. Helps every classifier. `real_ml.py` reads the choice from `metadata.json` and applies the same transform live. |
 | Regressor algorithm | **rf** (`--regressor-algo`) | Swept rf/gb/ridge/svr/knn: `rf` stayed best (R²=0.859-0.872 vs next-best svr 0.799). Ridge's poor showing confirms the dynamics are genuinely nonlinear. |
-| Strength fit target | mean log-resistance across all 10 steps | Simplification: averages across very different heater temperatures rather than picking one "best" step. Fits ended up excellent (R² 0.96-1.0) so this wasn't revisited, but a per-step or best-step fit is worth trying if classification/regression accuracy plateaus. |
+| Strength signal / label | mean log-resistance across all 10 steps; `y_conc` read linearly between the observed baseline (0) and plateau (1) levels | Simplification: averages across very different heater temperatures rather than picking one "best" step. Labels now come from the two observed stable levels (extrapolation-free); the per-segment exponential fit (R² 0.96-1.0) is still computed but is diagnostic-only. A per-step or best-step signal is worth trying if classification/regression accuracy plateaus. |
 | Rise phase included | yes | Plan calls this optional; included since it roughly doubles labelled decay-direction data and its fits are consistently the best (R² ~0.995-1.0). |
 | Purge phase | not separately detected | No real capture shows the post-decay curve re-stabilizing before file end, so there's nothing to detect yet — the whole post-plateau tail is treated as one continuous `decay` fit. Revisit if a future capture runs long enough to show it. |
 
-Full sweep: `experiments.csv` / `EXPERIMENTS.md` (23 runs, including the
-confirmation run that these defaults reproduce the best combined
-configuration with zero flags, and the later feature sweep that added the
-`raw_gradient` win). To go back to the original vanilla baseline
+Full sweep: `experiments.csv` / `EXPERIMENTS.md` (25 runs — the 9-run
+algorithm/feature sweep in exps 1–23, then exps 24–25 that switched the deployed
+model to the 4-class detect-SVM + rise-anchored labels on the 12-run data). To
+go back to the original vanilla baseline
 (RandomForest/RandomForest, lowpass off, window=5) for comparison: `python
 build_dataset.py --no-lowpass --window 5` + `python train.py
 --classifier-algo rf --regressor-algo rf`.
 
 ## Known caveats
 
-- Only 3 repeats per odour (9 runs total) — `smell_ml.split` offers
-  leave-one-run-out for a more stable estimate than a single held-out split,
-  per the plan's own caution about this.
+- Few repeats per odour — 6 lemon (3 original + 3 longer-decay "v2"), 3
+  grapefruit, 3 sorange (12 runs total), all captured at a single nominal
+  concentration (0.6). `smell_ml.split` offers leave-one-run-out for a more
+  stable estimate than a single held-out split, per the plan's own caution
+  about this.
 - `sensor_id` in the output is the physical chip-select (1/3/5/7), not a
   0-indexed position — keep that in mind if you one-hot it.
 - Classification labels (`y_class`) are just the filename-parsed odour string

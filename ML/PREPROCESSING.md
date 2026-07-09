@@ -7,7 +7,8 @@ model-selection experiments that consume the output see
 [`EXPERIMENTS.md`](EXPERIMENTS.md).
 
 Everything here was built and corrected against the **real** captures in
-`data/raw/` (9 runs: lemon, grapefruit, sorange — 3 each), not against the
+`data/raw/` (12 runs: grapefruit and sorange 3 each, lemon 6 — the 3 originals
+plus 3 longer-decay "v2" re-captures), not against the
 original plan's assumptions. Where the two diverge, the deviation is called
 out.
 
@@ -16,13 +17,13 @@ out.
 ## At a glance
 
 ```
-data/raw/*.csv                          one CSV per capture session (~30 min)
+data/raw/*.csv                          one CSV per capture session (~30 min; v2 ~35)
    │
    ▼  Stage 2a  select the 4 HP354 sensors (1,3,5,7)
    ▼  Stage 2b  cut each sensor's stream into heater cycles (step-index wraparound)
    ▼  Stage 2c  spline-align steps within a cycle        [OFF — jitter negligible]
    ▼  Stage 1   impute → log-transform → low-pass filter, per (sensor, step) channel
-   ▼  Stage 3   detect phases from curve shape, fit exponentials → strength label
+   ▼  Stage 3   detect phases from curve shape → strength label from baseline/plateau levels
    ▼  Stage 4   slide an N-cycle window per sensor → regression samples
    │
    ▼
@@ -71,6 +72,10 @@ temperature that resistance was measured.
 
 `load_run()` in [`io.py`](smell_ml/io.py) parses the filename into a `run_id`
 (`lemon_20260625_172513`) and `odour` (`lemon`), and returns the sorted rows.
+An **optional variant tag** after the concentration — e.g.
+`bme690_receiver_20260709_110002_lemon0.6v2.csv` — folds into the `run_id`
+(→ `lemon_20260709_110002_v2`) while still parsing to the same `odour`, which
+keeps the newer longer-decay lemon re-captures distinct from the originals.
 Odours are **discovered from filenames**, not hard-coded — which is how the
 pipeline noticed the real captures contain `sorange`, not the plan's
 `lavender`.
@@ -208,39 +213,69 @@ from buttons pressed on the capture rig, recorded in the `label_tag` column.
 > a wide stable exposure **plateau** (low resistance), then a slow **decay**
 > back toward baseline. `detect_phases()` in
 > [`labels.py`](smell_ml/labels.py) recovers this directly from the mean
-> log-resistance curve: it finds the widest stable high region (baseline) and
-> the widest stable low region (plateau), and everything between/after is
-> rise/decay.
+> log-resistance curve: it anchors the exposure **plateau** on the point of
+> maximum *drawdown* below the running maximum (`cummax - value`), takes the
+> **baseline** as the widest stable high region *before* that trough, and
+> everything between/after is rise/decay.
 >
 > If a future capture *does* populate `label_tag`, `build_dataset.py` raises
 > `NotImplementedError` rather than silently mislabelling — tag-based
 > segmentation was never built because there was no tagged data to test it on.
+
+> **Why drawdown, not a global min/max.** Two real-capture shapes break a
+> global-extremum anchor, both surfacing in the longer-decay **v2** lemon runs:
+> (a) the sensor's cold-start warm-up can read *lower* than peak exposure, so
+> the global minimum would be the warm-up, not the trough; (b) a long recovery
+> tail can climb back *above* the pre-exposure baseline, so the global maximum
+> would be the tail, not the baseline — which silently tagged whole exposures as
+> `warmup`, with no rise/plateau/decay at all. Drawdown (`cummax - value`) peaks
+> at the exposure trough no matter how low the warm-up dips or how high the tail
+> climbs; searching for the baseline only *before* that trough keeps the tail
+> out of it.
 
 Note the **inverted** convention this implies: the HIGH-resistance stable
 region is clean-air baseline (`y_conc = 0.0`) and the LOW-resistance region is
 peak exposure (`y_conc = 1.0`), because MOx resistance *drops* under reducing
 VOCs.
 
-Cycle counts by detected phase across all 9 runs (`meta.json`):
+Cycle counts by detected phase across all 12 runs (`meta.json`):
 
 | phase | cycles | y_conc |
 |---|--:|---|
-| baseline | 1 800 | 0.0 (anchor) |
-| rise | 599 | 0→1 from fit |
-| plateau | 2 078 | 1.0 (anchor) |
-| decay | 2 435 | 1→0 from fit |
-| warmup | 824 | *excluded* (NaN) |
+| baseline | 2 401 | 0.0 (level anchor) |
+| rise | 721 | 0→1 (level read-off) |
+| plateau | 2 786 | 1.0 (level anchor) |
+| decay | 3 737 | 1→0 (level read-off) |
+| warmup | 1 140 | *excluded* (NaN) |
 
-### The strength curve fit
+### The strength label — read off the levels, not the fit
 
-For each rise and decay segment, an exponential is fit to the mean
-log-resistance vs. time (`fit_concentration_curve`, anchored plateau = 1.0 /
-baseline = 0.0), and every cycle's `y_conc` is read off the fitted curve.
-Baseline and plateau cycles get 0.0 and 1.0 directly (they're the anchors).
-Warm-up cycles are left `NaN` and excluded downstream.
+`y_conc` is read **linearly between the two observed stable levels the rise
+spans**: the clean-air **baseline** level (strength 0) and the peak-exposure
+**plateau** level (strength 1). Each cycle's strength is simply where its mean
+log-resistance sits between those two levels, clipped to [0, 1]
+(`label_run_by_shape`). Baseline cycles land at ~0 and plateau cycles at ~1 by
+construction (their means *define* the anchors); rise and decay cycles
+interpolate across the gap. Warm-up cycles — and any degenerate run with no
+detectable baseline or plateau — are left `NaN` and excluded downstream.
 
-The fits are excellent — mean **R² = 0.992** across all 72 (run × sensor ×
-segment) fits, zero below 0.8. Example from `run_fits.csv` (lemon, sensor 1):
+> **This replaced a per-segment exponential fit as the label source.** The old
+> path fit an exponential to each rise/decay segment and read `y_conc` off the
+> fitted curve. Whenever a capture ended before the sensor had recovered, that
+> fit *extrapolated* the decay asymptote (the `asymptote_unreliable` fits
+> below), distorting exactly the low-strength tail. Anchoring to the
+> actually-observed baseline level is extrapolation-free and measurably improved
+> the strength regressor — **LORO R² 0.828 → 0.891** (see
+> [`EXPERIMENTS.md`](EXPERIMENTS.md)). A side effect: cycles in a rise/decay
+> segment too short to fit used to be left `NaN`; the level read-off needs no
+> fit, so they now get labelled too.
+
+The exponential is **still computed, but only for diagnostics** now — its
+`tau_s` (recovery time constant), `r_squared`, and the `asymptote_unreliable`
+flag characterise each segment without setting any label. Those diagnostic fits
+are excellent: mean **R² = 0.992**, zero below 0.8, across the 92 fitted
+segments (of 12 runs × 4 sensors × 2 = 96; 4 rise segments in one v2 run were
+too short to fit). Example from `run_fits.csv` (lemon, sensor 1):
 
 ```
 phase   r_squared   tau_s     n_cycles   duration_s   asymptote_unreliable
@@ -248,17 +283,20 @@ rise    0.9954      207.96    32         259.3        False
 decay   0.9846      164.77    69         569.0        False
 ```
 
-> **A caveat this stage records honestly.** 8 of the 72 fits have `tau_s` far
-> larger than the segment they were fit on (`asymptote_unreliable: true`) —
-> the capture ended before the recovery levelled off, so the fitted asymptote
-> is extrapolated, not observed. Those `y_conc` values are shakier;
-> `meta.json` counts them (`"n_unreliable_asymptote_fits": 8`) and the
+> **A caveat this stage records honestly — now diagnostic-only.** 8 fits have
+> `tau_s` far larger than the segment they were fit on
+> (`asymptote_unreliable: true`) — the capture ended before the recovery
+> levelled off, so the fitted asymptote is extrapolated, not observed. That
+> used to make those `y_conc` values shakier and is *why* the label was moved
+> off the fit; now that strength is a level read-off, the flag touches no label
+> and is purely a "capture ended before the sensor recovered" signal.
+> `meta.json` still counts them (`"n_unreliable_asymptote_fits": 8`) and the
 > per-run PNGs let you eyeball them.
 
 ### The mean-collapse, and what it does *not* affect
 
-The curve fit runs on the **mean** of the 10 steps per cycle
-(`mean_log_resistance`). This is the only place the 10 steps are collapsed to
+The label read-off (and the diagnostic fit) run on the **mean** of the 10 steps
+per cycle (`mean_log_resistance`). This is the only place the 10 steps are collapsed to
 one number — and it only affects the **label**, not the model features. The
 classifier and regressor both consume the full 10-step vector (the classifier
 additionally uses the 9 step-to-step gradients — the `raw_gradient` set). (Whether the
@@ -275,7 +313,7 @@ plateau cycle from `cycle_dataset.csv` (values are cleaned log-resistance):
 | cycle 102 | plateau | 1.00 | 10.07 | 13.25 | 9.96 | 9.83 |
 
 Every step is lower at the plateau than at baseline — resistance dropped under
-exposure — and the fit turns that whole trajectory into the smooth 0→1 label.
+exposure — and the level read-off turns that whole trajectory into the smooth 0→1 label.
 
 ---
 
@@ -326,11 +364,11 @@ Written to `data/processed/` (regenerable, git-ignored):
 
 | File | Shape / rows | Contents |
 |---|---|---|
-| `cycle_dataset.csv` | 7 736 rows | one row per (run, sensor, cycle): `run_id, odour, sensor_id, cycle_index, cycle_timestamp, phase, y_conc, step_0…step_9`. Classification-ready (single cycles); also human-inspectable. |
-| `window_dataset.npz` | 6 840 windows | regression-ready arrays: `X_window` `(6840, 3, 10)`, `y_conc`, `y_class`, `run_id`, `sensor_id`, `trend_slope`, `trend_diff_last`. |
-| `run_fits.csv` | 72 fits | one row per (run, sensor, rise/decay segment): `tau_s, r_squared, n_cycles, duration_s, asymptote_unreliable`, plus per-run `fs_hz`, `cutoff_hz`, imputation count. |
+| `cycle_dataset.csv` | 10 785 rows | one row per (run, sensor, cycle): `run_id, odour, sensor_id, cycle_index, cycle_timestamp, phase, y_conc, step_0…step_9`. Classification-ready (single cycles); also human-inspectable. |
+| `window_dataset.npz` | 9 549 windows | regression-ready arrays: `X_window` `(9549, 3, 10)`, `y_conc`, `y_class`, `run_id`, `sensor_id`, `trend_slope`, `trend_diff_last`. |
+| `run_fits.csv` | 96 rows | one row per (run, sensor, rise/decay segment): the now-diagnostic-only exp-fit `tau_s, r_squared, n_cycles, duration_s, asymptote_unreliable`, plus per-run `fs_hz`, `cutoff_hz`, imputation count. |
 | `meta.json` | — | pipeline summary: odours discovered, cycle counts by phase, mean R², low-R²/unreliable-fit counts, whether lowpass/alignment were applied. |
-| `data/diagnostics/*.png` | 36 plots | one per (run, sensor): cleaned curve colour-coded by detected phase with the `y_conc` overlay — the plan's mandated "validate the fit visually before trusting it." |
+| `data/diagnostics/*.png` | 48 plots | one per (run, sensor): cleaned curve colour-coded by detected phase with the `y_conc` overlay — the plan's mandated "validate the fit visually before trusting it." |
 
 ---
 
@@ -348,25 +386,108 @@ Reads every `bme690_receiver_*.csv` in `data/raw/`, uses
 outputs above. It prints per-run fit quality and flags any low-R² or
 unreliable-asymptote fits so problems surface immediately.
 
-`build_dataset.py` is a thin wrapper around
-[`preprocess.py`](preprocess.py), which owns the per-CSV pipeline
-(`preprocess_csv()`) and adds a **training / diagnostics-only switch**:
+`build_dataset.py` is a thin wrapper around [`preprocess.py`](preprocess.py),
+which owns the per-CSV pipeline (`preprocess_csv()`) and adds a **training /
+diagnostics-only switch** (drop `--training` to draw the PNGs but write no
+dataset). That switch — and how to read every graph the pipeline produces — is
+the next section.
+
+---
+
+## Diagnostic graphs — generating and reading them
+
+The plan mandates *visually validating the labels before trusting them*, so the
+pipeline renders one PNG per (run, sensor). Three scripts produce three flavours;
+all share the same layout, drawn by `plot_phase_labels` in
+[`diagnostics.py`](smell_ml/diagnostics.py).
+
+### What each graph shows
+
+File name: `{run_id}_sensor{sensor_id}_<suffix>.png`. Two things share one time
+axis (seconds since the run started):
+
+- **Left axis — mean log-resistance**, one dot per heater cycle, **coloured by
+  the detected phase**:
+
+  | phase | colour | where on the curve |
+  |---|---|---|
+  | warmup | grey | initial cold-start climb — excluded from labels |
+  | baseline | blue | wide stable **high** region = clean air (strength 0) |
+  | rise | orange | resistance dropping as the odour arrives |
+  | plateau | red | wide stable **low** region = peak exposure (strength 1) |
+  | decay | purple | resistance climbing back toward baseline |
+
+- **Right axis — strength `y_conc` (0–1)**: a **dashed black** line = the label
+  the pipeline assigned (`strength (true)`). Where a model prediction is
+  available it is added as a **dotted green** line.
+
+**How to read it** — a shape-vs-label check. The coloured dots should trace the
+arc grey → blue (high) → orange (falling) → red (low) → purple (rising), and the
+dashed strength line should sit at 0 through the blue baseline, ramp up through
+the orange rise, hold at 1 across the red plateau, and ramp back down through the
+purple decay. (This is exactly how the v2 mislabelling was caught: the whole
+exposure came out grey/"warmup" with a flat-zero strength line — see Stage 3's
+drawdown note.)
+
+### 1 · Label-validation graphs → `data/diagnostics/` (suffix `_fit`)
+
+Drawn automatically by the preprocessing; they show only the **shape-derived
+label** (dashed black, no prediction). This is the "are my labels right?" pass,
+done before any training.
 
 ```
-python preprocess.py --training              # same as build_dataset.py (HP354 -> training dataset)
-python preprocess.py --profile const320      # constant-320 sensors -> diagnostics ONLY, nothing saved
-python preprocess.py --profile hp354         # HP354 diagnostics only (no dataset written)
+python build_dataset.py                   # HP354 sensors → data/diagnostics/  (+ writes the dataset)
+python preprocess.py --profile hp354       # HP354 diagnostics ONLY — nothing written to data/processed/
+python preprocess.py --profile const320    # the constant-320 sensors → data/diagnostics_const320/
+python build_dataset.py --no-diagnostics   # skip them (faster dataset build)
 ```
 
-Without `--training`, only the per-run diagnostic PNGs are drawn and **nothing
-is written to `data/processed/`**. This is how the constant-temperature
-sensors (0, 2, 4, 6, which run `heater_const_320` and are *not* used for
-training) get inspected: same cleaning + shape-based phase detection + fit,
-plotted to `data/diagnostics_const320/`, kept entirely out of the training
-set. In practice those single-temperature sensors trace an even cleaner
-exposure arc than the modulated ones — their per-cycle mean isn't blended
-across three temperatures — though their recovery fits more often extrapolate
-the asymptote (flagged in the run output).
+48 plots for the 12 HP354 runs (× 4 sensors). `--profile const320` is how you
+eyeball the four constant-temperature sensors (0, 2, 4, 6) that run
+`heater_const_320` and never enter the training set — same cleaning + phase
+detection, plotted separately. In practice those single-temperature sensors
+trace an even cleaner exposure arc than the modulated HP354 ones (their per-cycle
+mean isn't blended across three temperatures), though their recovery segments
+more often trip the `asymptote_unreliable` flag.
+
+### 2 · Model-evaluation graphs → `data/diagnostics_eval/` (suffix `_eval`)
+
+[`evaluate.py`](evaluate.py) adds the strength regressor's **leave-one-run-out
+(out-of-fold) prediction** as the dotted green line over the dashed true label —
+each run predicted by a model trained on the *other 11* — so you can see where
+strength tracking is tight and where it drifts. Each title carries that run's
+LORO MAE / R².
+
+```
+python evaluate.py                        # the deployed rf regressor
+python evaluate.py --regressor-algo gb     # compare a different regressor
+```
+
+Needs `data/processed/` built first (`build_dataset.py`).
+
+### 3 · Fresh-capture test graphs → `testing/output/` (suffix `_test`)
+
+[`testing/test_capture.py`](testing/test_capture.py) runs the **deployed** model
+(`ML/models/`, trained on *all* runs) against a brand-new capture it has never
+seen — genuine held-out testing. The dotted line is the deployed regressor's
+prediction; the title shows the predicted odour + confidence and the strength MAE
+against the shape-derived reference. The input CSV needn't follow the training
+filename convention.
+
+```
+python testing/test_capture.py path/to/bme690_receiver_<ts>.csv
+python testing/test_capture.py my_capture.csv --no-lowpass   # match a model trained without the filter
+```
+
+### What to flag
+
+- **grey** anywhere but the very start, or **blue** on the recovered end-tail →
+  a phase-detection failure (the pre-drawdown bug).
+- **no red / no purple** → no exposure detected in that run.
+- a strength line that **never reaches 0 or 1**, or is **jagged** → a labelling
+  problem worth inspecting before training on it.
+- (eval / test only) the green prediction **lagging or overshooting** the decay
+  → regressor drift, expected on the hardest folds.
 
 ---
 
@@ -387,5 +508,5 @@ Putting the stages together for the first cycle of sensor 1 in the lemon run:
 6. **4** once the run reaches labelled cycles, this sensor's stream is sliced
    into 3-cycle windows for regression.
 
-Multiply by 4 sensors × 9 runs and you get the 7 736 cycles / 6 840 windows in
+Multiply by 4 sensors × 12 runs and you get the 10 785 cycles / 9 549 windows in
 `data/processed/`.

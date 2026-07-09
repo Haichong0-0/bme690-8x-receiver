@@ -90,8 +90,12 @@ The models are trained on **lemon, grapefruit, sorange** (sweet orange).
 > separable; `grapefruit`↔`sorange` are the residual confusion (shared citrus
 > terpenes) — see [`ML/README.md`](ML/README.md).
 
-All captures so far are at a single nominal concentration (0.6). Low-concentration
-behaviour is the known weak spot — see the discussion in `ML/`.
+All captures so far are at a single nominal concentration (0.6) — 12 runs in all
+(6 lemon, 3 grapefruit, 3 sorange). The classifier now carries a clean-air
+**`none`** class (handled host-side, never sent on the wire), so it flags an
+odour even at low concentration yet correctly rejects clean air ~97% of the time,
+where the earlier model — having no "no-odour" class — always mislabelled clean
+air as an odour. See the discussion in `ML/`.
 
 ---
 
@@ -171,12 +175,13 @@ and/or trained models you supply.
 ## Status
 
 Built and working: end-to-end capture → CSV, the offline ML pipeline + trained
-models, the live classify-then-regress publisher, and the HoloLens client
-(verified on-device over local Wi-Fi, Approach A). Known gaps: the live sensor
-stream reaches the publisher via CSV tail rather than a direct in-process feed;
-**Approach B** (the remote `wss://` relay) is designed but unbuilt; and
-low-concentration accuracy is limited by the single-concentration dataset. See
-[`progress.md`](progress.md) and each module's README.
+models (classifier LORO accuracy 0.837, regressor R² 0.891), the live
+classify-then-regress publisher, and the HoloLens client (verified on-device
+over local Wi-Fi, Approach A). Known gaps: the live sensor stream reaches the
+publisher via CSV tail rather than a direct in-process feed; **Approach B** (the
+remote `wss://` relay) is designed but unbuilt; and the dataset covers only a
+single nominal concentration (0.6), so behaviour across concentration levels is
+unvalidated. See [`progress.md`](progress.md) and each module's README.
 
 ## Repository history
 
