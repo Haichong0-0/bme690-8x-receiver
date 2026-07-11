@@ -20,7 +20,6 @@ import sys
 from pathlib import Path
 from typing import List
 
-import numpy as np
 import pandas as pd
 
 _SERVER_DIR = Path(__file__).resolve().parents[2] / "Server"
@@ -32,11 +31,6 @@ from bmeconfig_to_profile import convert as convert_bmeconfig  # noqa: E402
 HP354_ID_SUBSTRING = "354"
 CONST_TEMP_ID_SUBSTRING = "const"  # heater_const_320 -> the constant-temperature sensors
 N_STEPS = 10
-
-# label_tag -> phase, per the collection plan's labelling buttons. Every real
-# capture so far has label_tag == 0 throughout (buttons unused) — see
-# `assign_phase` below for the fallback that kicks in when that's the case.
-PHASE_CODES = {0: "baseline", 1: "rise", 2: "plateau", 3: "decay", 4: "purge"}
 
 
 def sensor_indices_by_profile(bmeconfig_path: Path, id_substring: str) -> List[int]:
@@ -62,11 +56,6 @@ def hp354_sensor_indices(bmeconfig_path: Path) -> List[int]:
 
 def filter_sensors(df_run: pd.DataFrame, sensor_indices: List[int]) -> pd.DataFrame:
     return df_run[df_run["sensor_index"].isin(sensor_indices)].copy()
-
-
-# Back-compat alias: the filter is sensor-set-generic, the name predates the
-# constant-temperature diagnostics path (preprocess.py).
-filter_hp354 = filter_sensors
 
 
 def true_cycle_index(df_sensor: pd.DataFrame) -> pd.DataFrame:
@@ -96,20 +85,6 @@ def raw_grid(df_sensor: pd.DataFrame) -> pd.DataFrame:
     # or was cut off before a full 10-step pass completed).
     complete = df_sensor.groupby("cycle").size() >= N_STEPS - 1
     return pivot.loc[complete.reindex(pivot.index, fill_value=False)]
-
-
-def assign_phase(df_sensor: pd.DataFrame) -> pd.Series:
-    """Phase per true heater-profile cycle.
-
-    Falls back to a single 'decay' phase for the whole run when label_tag is
-    unused (all zero) — which is every capture in data/raw/ so far:
-    each file is one continuous post-exposure recovery sweep, not a tagged
-    baseline/rise/plateau/decay/purge sequence. See ML/README.md."""
-    df_sensor = true_cycle_index(df_sensor)
-    tags = df_sensor.groupby("cycle")["label_tag"].agg(lambda s: s.mode().iat[0])
-    if (tags == 0).all():
-        return pd.Series("decay", index=tags.index, name="phase")
-    return tags.map(PHASE_CODES).fillna("unknown").rename("phase")
 
 
 def step_offset_jitter(df_sensor: pd.DataFrame) -> pd.DataFrame:

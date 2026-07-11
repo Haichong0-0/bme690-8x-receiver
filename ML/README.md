@@ -47,9 +47,9 @@ Writes to `data/processed/`:
 
 Stage 5 (scaling) and Stage 6 (split) are **not** applied by this script —
 which split to fit a scaler on is a training-time decision. Import the
-dataset above, then use `smell_ml.split.train_test_split_by_run(run_id, ...)`
-(or `leave_one_run_out`) and `smell_ml.scaling.WindowScaler` in your own
-training script, fitting the scaler on the training split only.
+dataset above, then split by run with `smell_ml.split.leave_one_run_out(run_id)`
+and z-score in your own training script — as `train.py` does with scikit-learn's
+`StandardScaler`, fitting it on the training split only.
 
 ## Module map (`smell_ml/`)
 
@@ -65,8 +65,7 @@ explained), see [`PREPROCESSING.md`](PREPROCESSING.md).
 | `align.py` | 2c | Optional spline (linear, log-space) step-offset alignment |
 | `labels.py` | 3 | Automatic phase detection from curve shape → rise-anchored linear `y_conc` (per-segment exponential fit still computed, now diagnostic-only) |
 | `windowing.py` | 4 | Sliding windows over cycles, per sensor |
-| `scaling.py` | 5 | z-score `WindowScaler`, fit-on-train-only |
-| `split.py` | 6 | Group-aware split / leave-one-run-out, `group=run_id` |
+| `split.py` | 6 | Group-aware leave-one-run-out split, `group=run_id` (Stage 5 scaling is done inline in `train.py` with scikit-learn's `StandardScaler`) |
 | `diagnostics.py` | — | Per-run fit/phase PNGs |
 | `models.py` | — | Classifier/regressor definitions + leave-one-run-out evaluation harness |
 

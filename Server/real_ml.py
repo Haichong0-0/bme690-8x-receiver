@@ -93,8 +93,17 @@ NONE_LABEL = "none"
 #     itself, and a high gate would defeat the point (identifying odour below
 #     the plateau), so the gate is a low backstop -> 0.15.
 # strength_gate=None (the default) auto-selects based on the loaded model.
-DEFAULT_STRENGTH_GATE = 0.6
-DEFAULT_STRENGTH_GATE_WITH_NONE = 0.15
+DEFAULT_STRENGTH_GATE = 0
+DEFAULT_STRENGTH_GATE_WITH_NONE = 0
+# For a baseline-relative classifier (metadata "baseline_relative": true): the
+# live clean-air baseline vector is estimated at startup, then frozen. The
+# sensor's cold-start warmup RISES for ~100s before the clean-air level settles,
+# so skip that transient (N_WARMUP_SKIP cycles) and then median the next
+# N_BASELINE_CYCLES stable cycles -- matching training, where the baseline vector
+# is the post-warmup "baseline" phase, not the warmup. Cycles land every ~8-11s,
+# so this is ~3 min: keep the sensor in clean air that long at startup.
+N_WARMUP_SKIP = 12
+N_BASELINE_CYCLES = 8
 
 
 def hp354_sensor_indices(bmeconfig_path: Path = DEFAULT_BMECONFIG) -> List[int]:
@@ -138,6 +147,15 @@ class RealEstimator(Estimator):
         # the live path matches it exactly (see `_classifier_features`). Older
         # metadata predates this key -> raw 10 steps, the original default.
         self.classifier_features: str = meta.get("classifier_features", "raw")
+        # If the classifier was trained baseline-relative (metadata
+        # "baseline_relative": true), the live path must subtract THIS session's
+        # own clean-air baseline vector per step before the feature transform
+        # (log R/R0). The absolute operating point (humidity / board / day)
+        # otherwise dominates and collapses the model to one class on a drifted
+        # sensor. The baseline is estimated live from the first N_BASELINE_CYCLES
+        # clean-air cycles per sensor, then frozen -- keep the sensor in clean
+        # air at startup.
+        self.baseline_relative: bool = meta.get("baseline_relative", False)
         # Does the classifier have a dedicated clean-air "none" class? If so it
         # detects no-odour itself (see infer()) and the strength gate is only a
         # low backstop; otherwise the gate is the primary clean-air guard.
@@ -153,6 +171,8 @@ class RealEstimator(Estimator):
         self._last_push: Dict[int, float] = {}
         self._sensor_state: Dict[int, str] = {}  # sensor_id -> "filling" | "ready" | "stale"
         self._inference_active = False
+        self._baseline_accum: Dict[int, list] = {}      # sensor_id -> early clean-air cycles
+        self._baseline_vec: Dict[int, np.ndarray] = {}  # sensor_id -> frozen baseline vector
 
     def push_cycle(self, sensor_id: int, step_log_resistance: np.ndarray) -> None:
         """Feed one completed heater-profile cycle's log-resistance vector
@@ -166,6 +186,20 @@ class RealEstimator(Estimator):
         buf = self._buffers.setdefault(sensor_id, deque(maxlen=self.window))
         buf.append(vec)
         self._last_push[sensor_id] = time.monotonic()
+        if self.baseline_relative and sensor_id not in self._baseline_vec:
+            # Skip the cold-start warmup rise, then median the next stable
+            # clean-air cycles as this sensor's baseline (matches training, which
+            # uses the post-warmup 'baseline' phase, not the transient). Until
+            # it's frozen the sensor can't be classified (infer() skips it).
+            acc = self._baseline_accum.setdefault(sensor_id, [])
+            acc.append(vec)
+            if len(acc) >= N_WARMUP_SKIP + N_BASELINE_CYCLES:
+                self._baseline_vec[sensor_id] = np.median(
+                    np.stack(acc[N_WARMUP_SKIP:]), axis=0).astype(np.float32)
+                self._baseline_accum.pop(sensor_id, None)
+                print(f"# real_ml: sensor {sensor_id} clean-air baseline captured "
+                      f"(skipped {N_WARMUP_SKIP} warmup, {N_BASELINE_CYCLES} cycles) "
+                      f"— now classifiable", file=sys.stderr)
         if self.verbose:
             print(f"# real_ml: sensor {sensor_id} cycle buffered ({len(buf)}/{self.window})  "
                   f"mean_log_r={float(vec.mean()):.3f}  range=[{float(vec.min()):.3f}, "
@@ -238,25 +272,35 @@ class RealEstimator(Estimator):
             self._inference_active = True
 
         clf_probs = []
-        for buf in ready.values():
-            latest = self._classifier_features(buf[-1])
+        for sid, buf in ready.items():
+            cyc = buf[-1]
+            if self.baseline_relative:
+                base = self._baseline_vec.get(sid)
+                if base is None:
+                    continue  # still capturing this sensor's clean-air baseline
+                cyc = cyc - base   # log R/R0 -- matches the training-time subtraction
+            latest = self._classifier_features(cyc)
             scaled = self.classifier_scaler.transform(latest)
             clf_probs.append(self.classifier.predict_proba(scaled)[0])
-        mean_proba = np.mean(clf_probs, axis=0)
-        classes = self.classifier.classes_
-        if self.has_none:
-            # 4-class "detect" model: report the best *real* odour (never
-            # "none") and use P(that odour) as the confidence. When "none"
-            # dominates (clean air, or too faint to identify) that probability
-            # is low, so the XR visual's confidence gate hides it — the
-            # classifier now does the no-odour detection the strength gate used
-            # to stand in for.
-            odour_idx = [i for i, c in enumerate(self._classes) if c != NONE_LABEL]
-            best_idx = odour_idx[int(np.argmax(mean_proba[odour_idx]))]
+
+        if not clf_probs:
+            # baseline-relative model, no sensor baselined yet (still inside the
+            # clean-air reference window) -- cannot classify, report no odour.
+            odour, confidence = ODOURS[0], 0.0
         else:
-            best_idx = int(np.argmax(mean_proba))
-        odour = str(classes[best_idx])
-        confidence = float(mean_proba[best_idx])
+            mean_proba = np.mean(clf_probs, axis=0)
+            classes = self.classifier.classes_
+            if self.has_none:
+                # Report the best REAL odour (never "none"); P(that odour) is the
+                # confidence, so clean air / faint cycles read low and the XR
+                # visual hides them. With baseline-relative features "none" is a
+                # genuine no-response detector (delta ~ 0 -> none).
+                odour_idx = [i for i, c in enumerate(self._classes) if c != NONE_LABEL]
+                best_idx = odour_idx[int(np.argmax(mean_proba[odour_idx]))]
+            else:
+                best_idx = int(np.argmax(mean_proba))
+            odour = str(classes[best_idx])
+            confidence = float(mean_proba[best_idx])
 
         reg_preds = []
         for buf in ready.values():
@@ -270,20 +314,6 @@ class RealEstimator(Estimator):
             scaled = self.regressor_scaler.transform(feats)
             reg_preds.append(self.regressor.predict(scaled)[0])
         intensity = float(np.clip(np.mean(reg_preds), 0.0, 1.0))
-
-        # Strength gate: zero the confidence when the regressor says almost no
-        # odour is present, so the XR visual shows "no smell" rather than a bogus
-        # odour. For a "detect" classifier this is a low backstop (0.15) behind
-        # the model's own "none" class; for a legacy plateau-only classifier it
-        # is the primary clean-air guard (0.6). See DEFAULT_STRENGTH_GATE.
-        gated = intensity < self.strength_gate
-        if gated:
-            confidence = 0.0
-
-        if self.verbose:
-            gate_note = f"  [gated: strength<{self.strength_gate:g}]" if gated else ""
-            print(f"# real_ml: infer -> odour={odour} confidence={confidence:.3f} "
-                  f"intensity={intensity:.3f}  ({len(ready)} sensor(s)){gate_note}", file=sys.stderr)
 
         return Inference(
             odour=odour,

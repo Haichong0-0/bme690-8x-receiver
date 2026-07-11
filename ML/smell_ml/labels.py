@@ -81,19 +81,6 @@ def fit_concentration_curve(cycle_timestamps: pd.Series, log_resistance: np.ndar
                              r_squared=r_squared, n_cycles=len(t))
 
 
-def concentration_from_fit(
-    log_resistance: np.ndarray, fit: ConcentrationFit, conc_at_t0: float, conc_at_inf: float
-) -> np.ndarray:
-    """Evaluate strength at each cycle, given which anchor (t=0 vs
-    asymptote) corresponds to which strength for this segment
-    (rise: 0.0 -> 1.0; decay: 1.0 -> 0.0)."""
-    if fit.r_inf == fit.r_t0:
-        return np.full_like(log_resistance, conc_at_t0)
-    progress = (log_resistance - fit.r_t0) / (fit.r_inf - fit.r_t0)  # 0 at t0, 1 at asymptote
-    conc = conc_at_t0 + (conc_at_inf - conc_at_t0) * progress
-    return np.clip(conc, 0.0, 1.0)
-
-
 def mean_log_resistance(grid: pd.DataFrame) -> np.ndarray:
     """The curve-fit target: mean log-resistance across the 10 steps per
     cycle. An empirical simplification (documented in ML/README.md) —
@@ -102,21 +89,6 @@ def mean_log_resistance(grid: pd.DataFrame) -> np.ndarray:
     justify preferring a specific step."""
     step_cols = [f"step_{i}" for i in range(10)]
     return grid[step_cols].mean(axis=1).to_numpy()
-
-
-def _longest_run(mask: np.ndarray) -> tuple[int, int]:
-    """[start, end) of the longest contiguous True run in `mask`."""
-    best_start = best_len = cur_start = cur_len = 0
-    for i, v in enumerate(mask):
-        if v:
-            if cur_len == 0:
-                cur_start = i
-            cur_len += 1
-            if cur_len > best_len:
-                best_start, best_len = cur_start, cur_len
-        else:
-            cur_len = 0
-    return best_start, best_start + best_len
 
 
 def detect_phases(values: np.ndarray, tol_fraction: float = 0.1) -> PhaseSegments:

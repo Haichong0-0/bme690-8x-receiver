@@ -114,7 +114,129 @@ firmware. Streams CSV matching BME AI-Studio's `.bmerawdata` schema.
 > True live capture → publisher wiring, and the Unity MRTK3 client (plan §5),
 > remain to build.
 
-### `Fruit_vis/`  — ACTIVE. The new HoloLens client (plan §5).
+### `fruit_unity/`  — ACTIVE (new). HoloLens client on Unity's Mixed Reality template.
+Unity **6000.4.11f1**, created from Unity Hub's **Mixed Reality template**
+(`com.unity.template.mixed-reality`) — brings a preconfigured XR Origin rig,
+**XR Interaction Toolkit** 3.4.1, **XR Hands** 1.7.3, AR Foundation, URP, plus
+sample scenes under `Assets/Samples/`. Has its own `.git`. Migrated from
+`Fruit_vis/`:
+- The five scripts copied verbatim into `Assets/Scripts/` (no code changes).
+- `com.microsoft.mixedreality.openxr` 1.11.2 — the template does **not** ship a
+  HoloLens/UWP loader (its own docs tell you to install this via the MR Feature
+  Tool). Installed as an **embedded package** at
+  `Packages/com.microsoft.mixedreality.openxr/` (NOT a `file:` tarball ref and
+  NOT in `manifest.json` — Unity auto-discovers embedded packages), because it
+  needs a local source patch (below). Pristine tarball kept at
+  `ThirdParty/com.microsoft.mixedreality.openxr-1.11.2.tgz`; diff against it to
+  see the patch. Re-extracting the tarball over the folder **loses the patch**.
+- **Local patch — `Editor/Settings/PlatformValidation.cs`,
+  `GenerateHL2RenderGraphRule()`:** Unity 6000.4's URP removed Render Graph
+  compatibility mode — `RenderGraphSettings.enableRenderCompatibilityMode` is
+  now `[Obsolete]`, get-only, hardcoded `false`. The plugin assigns it, giving
+  `CS0200: ... cannot be assigned to -- it is read only` (plus a cascading
+  Burst/Cecil "Failed to resolve assembly 'Assembly-CSharp'", which is just
+  fallout from Assembly-CSharp never being built). Patched to short-circuit the
+  rule under `UNITY_6000_4_OR_NEWER`; older-editor branches untouched. The rule
+  was an optional perf hint with no remedy left on 6000.4.
+- **AR Foundation pinned to 6.3.5, NOT 6.4.x** (template default was 6.4.3).
+  AF **6.4.0-pre.1** added its own `UnityEngine.XR.ARSubsystems.XRMarker` +
+  `ARMarkerManager`, which collide with the identically-named types Microsoft's
+  plugin has shipped for years. On 6.4.x the MR plugin fails to compile:
+  `CS0104: 'XRMarker' is an ambiguous reference` and a knock-on `CS0311` in
+  `ARMarkerManager.cs`. 6.3.5 is the last AF release before those types existed.
+  Nothing else in the template depends on AR Foundation (XRI, XR Hands and
+  Composition Layers all declare no AF dependency), so the downgrade is free.
+  Revisit if Microsoft ships a plugin release that guards the AF-6.4 collision.
+- **Removed `com.unity.xr.androidxr-openxr` and `com.unity.xr.meta-openxr`** —
+  Android XR / Meta Quest support we don't target. Removing androidxr also cures
+  the "asset in immutable package was unexpectedly altered
+  (`.../androidxr-openxr/Assets/URP/UniversalRenderPipelineAsset.asset`)" warning:
+  URP's asset upgrader rewrites that file inside the read-only package cache.
+- UWP `platformCapabilities` added (template ships them **empty** — without
+  `InternetClient` the WebSocket receiver silently fails to connect on device):
+  InternetClient, InternetClientServer, PrivateNetworkClientServer,
+  SpatialPerception.
+- **UWP scripting defines must be exactly `USE_STICK_CONTROL_THUMBSTICKS`.**
+  Remove the template's `USE_INPUT_SYSTEM_POSE_CONTROL`, and never add
+  `ENABLE_VR`, on the **UWP** tab. (Standalone is different — see below.)
+  **Unity 6000.4 does not ship `UnityEngine.VRModule` for UWP** — legacy
+  built-in VR is gone there, HoloLens goes through OpenXR. Proof: the compiler
+  response file `Library/Bee/artifacts/*.dag/Unity.RenderPipelines.Core.Runtime.rsp`
+  contains `-define:UNITY_WSA` but no `-r:...UnityEngine.VRModule.dll`, while the
+  same file in `Fruit_vis` (`-define:UNITY_STANDALONE_WIN`) does have it.
+  Consequences, both of which cost a day in July 2026:
+  - `ENABLE_VR` on UWP makes URP compile `XRSettings` (which lives *only* in
+    `UnityEngine.VRModule.dll`) against a module that isn't referenced →
+    `XRSRPSettings.cs: CS0103: The name 'XRSettings' does not exist` on ~8 lines.
+    The define is harmless on Standalone and poison on UWP — which is why it
+    fixed `Fruit_vis` and broke this project.
+  - `USE_INPUT_SYSTEM_POSE_CONTROL` (a define the *template* sets project-wide;
+    OpenXR's asmdef does not) makes OpenXR compile
+    `using PoseControl = UnityEngine.InputSystem.XR.PoseControl;`, and Input
+    System only declares that type under `(ENABLE_VR || UNITY_GAMECORE)` →
+    `OculusTouchControllerProfile.cs(12): CS0234`. Dropping the define is safe:
+    OpenXR ships its own `Runtime/input/PoseControl.cs` fallback, and XRI /
+    XR Hands reference the define in **zero** files.
+
+  Both errors cascade: URP core fails → OpenXR, `Assembly-CSharp` and
+  `MRTemplate` never build → Burst reports
+  `Failed to resolve assembly 'Assembly-CSharp'` and the console shows
+  `"Performant URP Renderer Config is missing RendererFeatures"`. Those two are
+  *symptoms of failed compilation*, not separate bugs. Diagnose from the `.rsp`
+  (`-define:` and `-r:` lines), not from the error text.
+- **Editing `ProjectSettings.asset` while the editor is open is pointless** —
+  Unity caches scripting defines in memory and rewrites the file on quit,
+  clobbering the edit. Either close Unity first, or change defines in
+  Player Settings → Other Settings → Scripting Define Symbols.
+- OpenXR loader **is** enabled for UWP: `Assets/XR/XRGeneralSettingsPerBuildTarget.asset`
+  → "Metro Providers" → `OpenXRLoader.asset`. (Standalone is on the AR
+  `SimulationLoader` instead — that's the template's editor-play default.)
+
+**Scene: the template's own `Assets/Scenes/SampleScene.unity`** (the build
+scene). Kept deliberately — it brings prebuilt lighting, the platform-aware
+background (`ARFeatureController` handles passthrough vs skybox), and the hand-
+tracking rig (`MR Interaction Setup` prefab, which holds the XR Origin + Main
+Camera). We add exactly one root object to it:
+- **`SmellSource`** at (0, -0.2, 1.5) — carries `SmellReceiver` +
+  `SmellVisualiser` (wired to each other) and `PacketDebugHud`. All three live
+  on this single object. The HUD is *not* parented to the camera: there is no
+  camera in the scene YAML (it's inside the `MR Interaction Setup` prefab), and
+  `PacketDebugHud` builds its own body-locked canvas at runtime, resolving
+  `Camera.main` via `BodyLockedFollow`. So nothing to maintain scene-side.
+
+Scene roots, in order: `MR Interaction Setup` (rig/hands) → `Permissions Manager`
+→ `Lighting` → `Environment` → `SmellSource`. The template's **onboarding-tutorial
+UI was stripped** (72 YAML blocks: the `UI` root and its whole subtree — Coaching
+UI, Tutorial Player, Delete All Button, Tap Tooltip / Tooltip Worldspace, Spatial
+Panel Manipulator and its affordance demos, Snap Volume). Backup at
+`SampleScene.unity.bak`.
+
+> **Stripping the tutorial requires disabling `Goal Manager`.** It lives inside
+> the `MR Interaction Setup` prefab, and its `ProcessGoals()` — called every frame
+> from `Update()` — dereferences `m_GoalPanelLazyFollow` **unguarded**
+> (`MRTemplateAssets/Scripts/GoalManager.cs:196`). With the Coaching UI gone that
+> NREs every frame. Handled by an `m_Enabled: 0` prefab-instance override on the
+> GoalManager MonoBehaviour (prefab-internal fileID `9177915868812651432`), plus
+> nulling every `objectReference` in the instance's `m_Modifications` that pointed
+> into the deleted subtree. Don't re-enable it without restoring that UI.
+
+> **Do NOT delete `Assets/Samples/XR Interaction Toolkit/3.4.1/{AR Starter
+> Assets, Hands Interaction Demo, Starter Assets}`.** They look like disposable
+> demo content but are **not self-contained**: `MRTemplateAssets` prefabs
+> (`MR Interaction Setup` → XR Origin Hands rig + `XRI Default Input Actions`,
+> `HandMenuSetupVariant_MRTemplate`, `Permissions Manager Variant`, …) reference
+> into all three, and `SampleScene` is built from those prefabs. Deleting them
+> breaks the camera rig and hand tracking. (Tried in July 2026, reverted.)
+> The camera is three prefabs deep:
+> `MR Interaction Setup` → `XR Origin Hands (XR Rig)` (Hands Interaction Demo) →
+> `XR Origin (XR Rig)` (Starter Assets) — which is why `PacketDebugHud` lives on
+> `SmellSource` and resolves `Camera.main` at runtime rather than being parented.
+> `Assets/Samples/XR Hands/1.7.3/HandVisualizer/` *is* free-standing.
+
+Still to do in-editor: enable OpenXR + Microsoft HoloLens feature group on the
+**UWP** tab of XR Plug-in Management, then build.
+
+### `Fruit_vis/`  — SUPERSEDED by `fruit_unity/`, kept as a verified fallback.
 Unity **6000.4.11f1** (Unity 6.4), URP, new Input System. The fresh build of the
 packet **receiver + visualiser**. XR stack (no MRTK), all declared in
 `Packages/manifest.json`: Unity OpenXR + XR Plug-in Management + AR Foundation

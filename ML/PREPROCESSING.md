@@ -345,8 +345,8 @@ fingerprint, so the classifier trains on single cycles.
 Deliberately **not** applied by `build_dataset.py`:
 
 - **Stage 5 — scaling.** Z-score, but which split to fit the mean/std on is a
-  training decision, so `WindowScaler` in [`scaling.py`](smell_ml/scaling.py)
-  is left for the consumer (`train.py`) to fit on the training fold only.
+  training decision, so it's left to the consumer: `train.py` fits scikit-learn's
+  `StandardScaler` on the training fold only.
 - **Stage 6 — group-aware split.** `split.py` splits by `run_id`, which
   satisfies both leakage risks at once: the 4 sensors of one cycle are
   near-duplicates and stay together, and adjacent cycles of one sweep are

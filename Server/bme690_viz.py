@@ -88,12 +88,8 @@ class CsvTail:
 
         try:
             text = data.decode("utf-8")
-        except UnicodeDecodeError as e:
-            # A read can land mid-way through a multi-byte char if it races
-            # the writer. Decode only the valid prefix so we still make
-            # progress on already-complete lines instead of retrying the
-            # same broken tail forever.
-            text = data[:e.start].decode("utf-8")
+        except UnicodeDecodeError:
+            return switched, []
 
         if text.endswith("\n"):
             complete = text
@@ -281,18 +277,27 @@ def main() -> int:
     ap.add_argument("--file", type=Path, default=None,
                     help="Specific CSV to tail. Default: newest "
                          "data/bme690_receiver_*.csv (or in current dir).")
-    ap.add_argument("--window", type=float, default=60.0,
-                    help="Seconds of history per sensor (default 60).")
+    ap.add_argument("--window", type=float, default=0.0,
+                    help="Seconds of history to show per sensor. "
+                         "0 (default) shows the ENTIRE session from t=0; "
+                         "pass a positive value for a rolling window.")
     ap.add_argument("--refresh-ms", type=int, default=500,
                     help="Refresh interval in ms (default 500).")
     ap.add_argument("--verbose", "-v", action="store_true",
                     help="Print tail diagnostics to stderr.")
     args = ap.parse_args()
 
+    # window <= 0 means "show the whole recording": no rolling crop on the
+    # x-axis and unbounded buffers so early samples are never evicted.
+    full_session = args.window <= 0.0
+
     tail = CsvTail(explicit=args.file)
     buffers = None
     fmt_label = "—"
     t0: Optional[float] = None
+    # Latest sample time (seconds) seen so far. Drives the x-axis right edge,
+    # so the axis only advances when real data arrives — never on wall clock.
+    t_data_max = 0.0
 
     print(f"# viz starting; CWD={Path.cwd()}", file=sys.stderr)
 
@@ -327,13 +332,14 @@ def main() -> int:
     fig.tight_layout(rect=(0, 0, 1, 0.94))
 
     def update(_frame):
-        nonlocal buffers, fmt_label, t0
+        nonlocal buffers, fmt_label, t0, t_data_max
         switched, rows = tail.poll()
 
         if switched:
             if buffers is not None:
                 buffers.clear()
             t0 = None
+            t_data_max = 0.0
             fmt_label = "—"
             if args.verbose:
                 print(f"# switched to {tail.path}", file=sys.stderr)
@@ -346,7 +352,9 @@ def main() -> int:
                     print(f"# unknown CSV format: header={tail.header[:6]}",
                           file=sys.stderr)
             else:
-                buffers = cls()
+                # capacity=None → unbounded deques, so the whole session is
+                # retained when full_session is on.
+                buffers = cls(capacity=None if full_session else 4096)
                 fmt_label = cls.LABEL
                 if args.verbose:
                     print(f"# format detected: {fmt_label}", file=sys.stderr)
@@ -356,19 +364,40 @@ def main() -> int:
 
         now_wall = time.time()
         for row in rows:
-            if t0 is None:
-                t0 = now_wall
-            buffers.push_row(row, now_wall - t0)
+            # Prefer the sample's own session timestamp so the x-axis tracks
+            # real acquisition time — identical whether we're following a live
+            # capture or replaying a finished CSV. Fall back to wall-clock
+            # arrival time only for legacy rows without the column.
+            ts_ms = _f(row.get("timestamp_since_poweron", ""))
+            if ts_ms is not None:
+                t_sec = ts_ms / 1000.0
+            else:
+                if t0 is None:
+                    t0 = now_wall
+                t_sec = now_wall - t0
+            buffers.push_row(row, t_sec)
+            if t_sec > t_data_max:
+                t_data_max = t_sec
 
         if args.verbose and rows:
             print(f"# +{len(rows)} rows (bytes={tail._byte_pos})",
                   file=sys.stderr)
 
-        if t0 is None:
+        # Nothing plottable yet — hold the axes still instead of scrolling an
+        # empty window. The graph only starts moving once real samples arrive
+        # (i.e. once bme690_receiver.py is actually streaming from the board).
+        if not any(buffers.has_data):
+            axes_flat[0].set_xlim(0.0, 1.0)
+            fig.suptitle("waiting for data...", fontsize=11)
             return _all_artists(lines, heat_dots)
-        now_rel = now_wall - t0
-        t_lo = max(0.0, now_rel - args.window)
-        t_hi = max(args.window, now_rel)
+
+        now_rel = t_data_max
+        if full_session:
+            t_lo = 0.0
+            t_hi = max(1.0, now_rel)
+        else:
+            t_lo = max(0.0, now_rel - args.window)
+            t_hi = max(args.window, now_rel)
 
         gas_min, gas_max = float("inf"), 0.0
         temps, hums, press = [], [], []

@@ -11,8 +11,8 @@ Raw capture CSVs live under ML/data/raw/ (gitignored), not Server/ — Server/
 is the live/deployed side and only needs the trained model artifacts.
 
 Stage 5 (scaling) and Stage 6 (split) are intentionally NOT applied here —
-which split to fit a scaler on is a training-time decision. Use
-smell_ml.split / smell_ml.scaling after importing the dataset.
+which split to fit a scaler on is a training-time decision. train.py splits with
+smell_ml.split.leave_one_run_out and scales with scikit-learn's StandardScaler.
 
 Usage:
     python build_dataset.py

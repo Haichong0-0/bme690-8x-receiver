@@ -15,16 +15,7 @@ from __future__ import annotations
 from typing import Iterator, Tuple
 
 import numpy as np
-from sklearn.model_selection import GroupShuffleSplit, LeaveOneGroupOut
-
-
-def train_test_split_by_run(
-    run_ids: np.ndarray, test_size: float = 0.3, seed: int = 0
-) -> Tuple[np.ndarray, np.ndarray]:
-    gss = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
-    idx = np.arange(len(run_ids))
-    train_idx, test_idx = next(gss.split(idx, groups=run_ids))
-    return train_idx, test_idx
+from sklearn.model_selection import LeaveOneGroupOut
 
 
 def leave_one_run_out(run_ids: np.ndarray) -> Iterator[Tuple[np.ndarray, np.ndarray]]:

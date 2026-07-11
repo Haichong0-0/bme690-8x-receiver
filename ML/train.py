@@ -118,7 +118,7 @@ def build_classifier_features(steps: np.ndarray, features: str = "raw") -> np.nd
 # (i.e. whatever build_dataset.py was last run with) plus this run's own choices.
 EXPERIMENT_COLUMNS = [
     "exp_id", "timestamp", "lowpass_filter_applied", "window_size_cycles",
-    "classifier_phase_filter", "classifier_algo", "classifier_features", "regressor_algo",
+    "classifier_phase_filter", "classifier_algo", "classifier_features", "baseline_relative", "regressor_algo",
     "n_cycles_total", "n_windows_total",
     "classifier_loro_accuracy", "classifier_loro_f1_macro",
     "regressor_loro_mae", "regressor_loro_rmse", "regressor_loro_r2", "notes",
@@ -130,6 +130,7 @@ EXPERIMENT_COLUMN_BACKFILL = {
     "classifier_algo": "rf",       # pre-algo-sweep runs were RandomForest
     "regressor_algo": "rf",
     "classifier_features": "raw",  # pre-temp-contrast runs used the raw 10 steps
+    "baseline_relative": False,    # pre-drift-fix runs used absolute levels
 }
 
 
@@ -188,6 +189,7 @@ def log_experiment(row: dict) -> None:
 
 def load_classification_data(phase_filter: str, features: str = "raw",
                              odour_conc_threshold: float = DEFAULT_ODOUR_CONC_THRESHOLD,
+                             baseline_relative: bool = False,
                              ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Classifier features per cycle. `features`:
       - "raw": the 10 per-step log-resistance values (the original default).
@@ -238,7 +240,21 @@ def load_classification_data(phase_filter: str, features: str = "raw",
         subset = pd.concat([none, odour], ignore_index=True)
     else:
         raise ValueError(f"unknown phase_filter {phase_filter!r}")
-    steps = subset[STEP_COLS].to_numpy(dtype=np.float32)
+    if baseline_relative:
+        # Subtract each (run, sensor)'s own clean-air baseline vector, per step
+        # (log R/R0 -- the classic drift-invariant e-nose response). Absolute
+        # level encodes the session/humidity/board, not the odour, so raw-level
+        # models collapse to one class on a live sensor at a different operating
+        # point; deltas cancel any per-step offset. real_ml.py estimates the same
+        # baseline live (first clean-air cycles) and subtracts it before serving.
+        base = (df[df["phase"] == "baseline"].groupby(["run_id", "sensor_id"])[STEP_COLS]
+                .mean().rename(columns={c: c + "_b" for c in STEP_COLS}).reset_index())
+        subset = subset.merge(base, on=["run_id", "sensor_id"], how="left").dropna(
+            subset=[c + "_b" for c in STEP_COLS])
+        steps = (subset[STEP_COLS].to_numpy(np.float32)
+                 - subset[[c + "_b" for c in STEP_COLS]].to_numpy(np.float32))
+    else:
+        steps = subset[STEP_COLS].to_numpy(dtype=np.float32)
     X = build_classifier_features(steps, features)
     y = subset["odour"].to_numpy()
     run_id = subset["run_id"].to_numpy()
@@ -266,20 +282,21 @@ def _print_loro(label: str, result: models.LOROResult, extra_keys: list[str]) ->
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--classifier-phase-filter", choices=["plateau", "high_conc", "detect"], default=None,
-                     help="which cycles train the classifier. plateau/high_conc: the original 3-class "
-                          "{lemon,grapefruit,sorange} on peak-exposure cycles (default: try both, keep the "
-                          "better LORO accuracy). detect: the 4-class low-concentration classifier "
-                          "{none,lemon,grapefruit,sorange} -- a clean-air 'none' class + odour classes "
-                          "trained across a concentration range (see load_classification_data). Deploy "
-                          "detect with --classifier-algo svm (won the low-concentration eval).")
+    ap.add_argument("--classifier-phase-filter", choices=["plateau", "high_conc", "detect"], default="detect",
+                     help="which cycles train the classifier. DEFAULT 'detect' -- the deployed 4-class "
+                          "{none,lemon,grapefruit,...} classifier: a clean-air 'none' class + odour classes "
+                          "trained across a concentration range (see load_classification_data). "
+                          "plateau/high_conc are the legacy 3-class {odours-only} modes on peak-exposure "
+                          "cycles (kept for comparison; pass one explicitly).")
     ap.add_argument("--odour-conc-threshold", type=float, default=DEFAULT_ODOUR_CONC_THRESHOLD,
                      help="for --classifier-phase-filter detect: min y_conc for a cycle to carry its odour "
                           f"label (below it, only baseline cycles feed the 'none' class). default "
                           f"{DEFAULT_ODOUR_CONC_THRESHOLD}")
-    ap.add_argument("--classifier-algo", choices=list(models.CLASSIFIER_FACTORIES), default="logreg",
-                     help="default: logreg -- won the algorithm sweep (ML/EXPERIMENTS.md), "
-                          "0.746-0.755 LORO accuracy vs rf's 0.581-0.611")
+    ap.add_argument("--classifier-algo", choices=list(models.CLASSIFIER_FACTORIES), default="svm",
+                     help="DEFAULT 'svm' -- won the 4-class detect eval and is the deployed model "
+                          "(its factory sets probability=True for serving). 'logreg' won the older "
+                          "3-class plateau sweep (0.746-0.755); use it only with --classifier-phase-filter "
+                          "plateau/high_conc.")
     ap.add_argument("--classifier-features",
                      choices=["raw", "temp_contrast", "gradient", "raw_gradient"], default="raw_gradient",
                      help="raw_gradient = 10 per-step log-resistance levels + their 9 step-to-step "
@@ -290,6 +307,14 @@ def main() -> int:
                           "raw = the 10 levels only; gradient = the 9 slopes only (pure shape); "
                           "temp_contrast = raw + cross-temperature contrast features "
                           "(see load_classification_data)")
+    ap.add_argument("--baseline-relative", action=argparse.BooleanOptionalAction, default=True,
+                     help="subtract each (run,sensor)'s clean-air baseline vector before the "
+                          "classifier-features transform (log R/R0) -- DEFAULT ON. Drift-invariant: "
+                          "raw-level models collapse to one class on a live sensor at a different "
+                          "humidity/operating point; baseline-relative survives it. Pass "
+                          "--no-baseline-relative for the old absolute-level features (higher-looking "
+                          "LORO but leaky / not deployable). real_ml.py estimates the live baseline "
+                          "and subtracts it to match.")
     ap.add_argument("--regressor-algo", choices=list(models.REGRESSOR_FACTORIES), default="rf",
                      help="default: rf -- won the algorithm sweep (ML/EXPERIMENTS.md), R^2 0.859-0.872")
     ap.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
@@ -309,9 +334,11 @@ def main() -> int:
     best = None  # (filter_name, LOROResult, X, y, run_id)
     for f in filters_to_try:
         X, y, run_id, _ = load_classification_data(
-            f, features=args.classifier_features, odour_conc_threshold=args.odour_conc_threshold)
+            f, features=args.classifier_features, odour_conc_threshold=args.odour_conc_threshold,
+            baseline_relative=args.baseline_relative)
         result = models.evaluate_classifier_loro(X, y, run_id, algo=args.classifier_algo, seed=args.seed)
-        _print_loro(f"classifier [{f}/{args.classifier_algo}/{args.classifier_features}] "
+        _print_loro(f"classifier [{f}/{args.classifier_algo}/{args.classifier_features}"
+                    f"{'+baseline_rel' if args.baseline_relative else ''}] "
                     f"(n={len(y)}, dim={X.shape[1]})", result, ["accuracy", "f1_macro"])
         if best is None or result.mean_metrics["accuracy"] > best[1].mean_metrics["accuracy"]:
             best = (f, result, X, y, run_id)
@@ -348,6 +375,7 @@ def main() -> int:
         "odour_conc_threshold": args.odour_conc_threshold if clf_filter == "detect" else None,
         "classifier_algo": args.classifier_algo,
         "classifier_features": args.classifier_features,
+        "baseline_relative": args.baseline_relative,
         "regressor_algo": args.regressor_algo,
         "classifier_loro_accuracy": clf_result.mean_metrics["accuracy"],
         "classifier_loro_f1_macro": clf_result.mean_metrics["f1_macro"],
@@ -371,6 +399,7 @@ def main() -> int:
         "classifier_phase_filter": clf_filter,
         "classifier_algo": args.classifier_algo,
         "classifier_features": args.classifier_features,
+        "baseline_relative": args.baseline_relative,
         "regressor_algo": args.regressor_algo,
         "n_cycles_total": proc_meta["n_cycles_total"],
         "n_windows_total": proc_meta["n_windows_total"],

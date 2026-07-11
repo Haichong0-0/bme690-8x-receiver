@@ -146,7 +146,7 @@ def build_packet(est: Estimator, seq: int, t: float) -> dict:
 
 
 STATUS_LOG_INTERVAL_S = 1.0        # heartbeat while producing real (non-idle) readings
-IDLE_STATUS_LOG_INTERVAL_S = 10.0  # slower heartbeat while idle (odour_confidence==0) -- nothing's
+IDLE_STATUS_LOG_INTERVAL_S = 1.0  # slower heartbeat while idle (odour_confidence==0) -- nothing's
                                     # changing, so once/sec for a potentially unattended stretch is just noise
 
 
