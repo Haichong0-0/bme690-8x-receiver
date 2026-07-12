@@ -121,15 +121,16 @@ and writes `models/` (`classifier.joblib`, `regressor.joblib`, scalers,
 `build_dataset.py` first.
 
 ```bash
-python train.py --classifier-phase-filter detect --classifier-algo svm  # the deployed 4-class detect-SVM
-python train.py                                  # historical 3-class classifier (auto plateau/high_conc, logreg + raw_gradient), rf
+python train.py                                  # the deployed model: 4-class detect-SVM on baseline-relative raw_gradient (all defaults)
+python train.py --no-baseline-relative --classifier-phase-filter plateau --classifier-algo logreg  # legacy 3-class absolute-level comparison
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--classifier-algo {rf,gb,svm,logreg,knn}` | logreg | Classifier algorithm. The deployed detect classifier uses `svm` (its factory sets `probability=True` so `predict_proba` works at serving). |
+| `--classifier-algo {rf,gb,svm,logreg,knn}` | svm | Classifier algorithm. The deployed detect classifier uses `svm` (its factory sets `probability=True` so `predict_proba` works at serving); `logreg` won the older 3-class plateau sweep. |
 | `--classifier-features {raw,gradient,raw_gradient,temp_contrast}` | raw_gradient | Feature set — must match what `real_ml.py` will serve. |
-| `--classifier-phase-filter {plateau,high_conc,detect}` | auto (tries plateau/high_conc) | Which cycles train the classifier. `detect` is the deployed 4-class mode: a clean-air `none` class + odour classes trained across a concentration range (rise/plateau/decay). |
+| `--baseline-relative` / `--no-baseline-relative` | on | Subtract each (run,sensor)'s clean-air baseline before the feature transform (log R/R₀). **The drift fix** — deployed on. `--no-baseline-relative` gives the old absolute-level features (higher-looking LORO, but leaky and not deployable live). |
+| `--classifier-phase-filter {plateau,high_conc,detect}` | detect | Which cycles train the classifier. `detect` (default) is the deployed 4-class mode: a clean-air `none` class + odour classes trained across a concentration range (rise/plateau/decay). `plateau`/`high_conc` are the legacy 3-class modes. |
 | `--odour-conc-threshold <f>` | 0.4 | For `--classifier-phase-filter detect`: min `y_conc` for a cycle to carry its odour label (below it, only baseline cycles feed the `none` class). |
 | `--regressor-algo {rf,gb,ridge,svr,knn}` | rf | Regressor algorithm. |
 | `--models-dir` / `--seed` / `--note` | see `-h` | Output dir / RNG seed / experiments.csv note. |
@@ -182,10 +183,11 @@ Reads `data/processed/`, evaluates via leave-one-run-out (12 folds — every
 capture held out once), then refits on all data and writes to `models/`:
 `classifier.joblib` + `classifier_scaler.joblib`, `regressor.joblib` +
 `regressor_scaler.joblib`, `metadata.json` (LORO metrics, confusion matrix,
-which cycle-phase filter the classifier used). The bare `python train.py` still
-runs the historical 3-class classifier (auto plateau/high_conc, logreg); the
-deployed model in `models/` is the 4-class detect-SVM, so pass the two flags
-above to reproduce it.
+which cycle-phase filter the classifier used, whether baseline-relative). The
+bare `python train.py` now reproduces the deployed model directly — 4-class
+detect-SVM on baseline-relative `raw_gradient` — since those are the defaults;
+pass `--no-baseline-relative --classifier-phase-filter plateau --classifier-algo
+logreg` for the legacy 3-class comparison.
 
 ### Evaluation plots
 
@@ -216,14 +218,15 @@ you changed. Don't hand-edit `EXPERIMENTS.md`; it's regenerated from
 
 ### Algorithm + preprocessing sweep results
 
-25 experiments in `experiments.csv` / `EXPERIMENTS.md` — see there for the
-full table. The sweep below (exps 1–23) was run on the original **9-run**
-dataset and picked the 3-class classifier + regressor defaults; the
-**deployed** model (exps 24–25) has since moved to a 4-class detect-SVM on the
-**12-run** dataset — see "Deployed classifier + regressor" at the end of this
-section. Summary of what moved the numbers in the sweep, each holding
-everything else fixed at the exp-2 baseline (lowpass off, window=5, `plateau`
-classifier cycles, RandomForest/RandomForest):
+31 experiments in `experiments.csv` / `EXPERIMENTS.md` — see there for the
+full table. The sweep below (exps 1–23) was run on the original **9-run**,
+**sorange-era** dataset and picked the 3-class classifier + regressor defaults;
+the **deployed** model has since moved to a 4-class detect-SVM, rise-anchored
+labels, and **baseline-relative** features on the current **15-run** (lavender)
+dataset — see "Deployed classifier + regressor" at the end of this section.
+Summary of what moved the numbers in the sweep, each holding everything else
+fixed at the exp-2 baseline (lowpass off, window=5, `plateau` classifier cycles,
+RandomForest/RandomForest):
 
 **Classifier algorithm** (regressor held at `rf`): **logreg 0.746** > svm
 0.688 > rf 0.581 (baseline) > gb 0.561 > knn 0.534. Logistic regression won
@@ -285,47 +288,62 @@ cause (shared dominant citrus terpenes).
 
 #### Deployed classifier + regressor (what `models/` currently holds)
 
-The shipped model has since moved on from that 3-class config in two ways
-(exps 24–25, on the **12-run** dataset):
+The shipped model has moved on from that 3-class config in three ways
+(exps 24–30, on the **15-run** dataset — lemon ×6, grapefruit ×6, lavender ×3):
 
 1. **Classifier → 4-class "detect" SVM** (exp 24). The plateau-only 3-class
    classifier had no way to say "clean air" and forced an odour label onto
-   every cycle — live, clean-air baseline cycles were classified `grapefruit`
+   every cycle — live, clean-air baseline cycles were classified as an odour
    ~100% of the time. The `detect` mode adds a clean-air **`none`** class
    (baseline cycles) and trains the odour classes across a concentration
    **range** (every cycle with `y_conc ≥ 0.4 = --odour-conc-threshold`, spanning
    rise/plateau/decay, not just the plateau), so it learns each odour's
    fingerprint *below* full strength. SVM (rbf, `probability=True`) won this
-   decisively over logreg. LORO **accuracy 0.837, f1_macro 0.535**, trained on
-   **7,747 cycles**. Clean air is now called `none` 97% of the time (2333/2401,
-   was 0%), and odours are identified below the plateau.
+   decisively over logreg.
 
-2. **Rise-anchored linear strength labels** (exp 25, see Stage 3 below). Reading
+2. **Baseline-relative features → the drift fix** (exp 30, now the default).
+   The detect SVM on *absolute* log-resistance scored a higher-looking **0.925**
+   LORO — but that was leaky. Absolute resistance encodes the session (humidity,
+   board, day), and because each odour was captured on its own day the model
+   latched onto *which day* rather than the odour; on a live sensor at a
+   different humidity it collapsed to a single class (the real live failure).
+   Subtracting each run/sensor's own clean-air baseline (**`--baseline-relative`**,
+   log R/R₀) is drift-invariant. The honest LORO drops to **0.771** (f1_macro
+   0.612, **9,745 cycles**) but the model survives live: clean air is `none`
+   **100%** of the time, and the residual is odour-vs-odour (~0.6). An early
+   version of this test — run on the in-distribution offline data alone —
+   *lowered* `rf` accuracy (0.61 → 0.48) and was once written off as "ruling out
+   drift"; that was the wrong read. Offline there's little cross-session drift to
+   correct, so subtraction only costs a little discriminative signal; the payoff
+   appears exactly where it's needed, on live out-of-distribution captures. See
+   `train.py`'s `load_classification_data` docstring.
+
+3. **Rise-anchored linear strength labels** (exp 25, see Stage 3 below). Reading
    `y_conc` off the observed baseline/plateau levels instead of the exponential
-   fit's extrapolated asymptote lifted the regressor from R² 0.828 → **0.891**
-   on the 12-run data (beating even the original 9-run 0.872): **MAE 0.067,
-   RMSE 0.103, R² 0.891**, trained on **9,549 windows**.
+   fit's extrapolated asymptote lifted the regressor to R² **0.891**: on the
+   15-run data **MAE 0.083, RMSE 0.118, R² 0.891**, trained on **14,208 windows**.
 
-Deployed confusion matrix (4-class detect-SVM, rows = true, cols = predicted;
-lemon is strong, grapefruit↔sorange is the residual confusion):
+Deployed confusion matrix (4-class detect-SVM, baseline-relative, rows = true,
+cols = predicted; clean air is perfectly rejected, and `lemon` is now the
+confusion sink — both grapefruit and lavender leak into it):
 
 ```
               predicted:
-              grapefruit  lemon  none  sorange
-  grapefruit:   1100        29     6     281
-       lemon:     46      2153   126     245
-        none:     18        50  2333       0
-     sorange:    381        67     3     909
+              grapefruit  lavender  lemon  none
+  grapefruit:    2207         0      441     3    (83%)
+    lavender:      22       684      668     0    (50%)
+       lemon:     581       450     1539     0    (60%)
+        none:       0         0        0  3150   (100%)
 ```
 
-Likely next steps if the odour pair needs to go further: collect more repeats
-(3/odour is still thin for grapefruit and sorange), or — if `sorange` isn't
-actually in the live rotation (see the lavender-vs-sorange note below) — drop
-`sorange` and retrain without the hard grapefruit↔sorange pair entirely.
+The fix from here is better data collection, not more modelling: interleave the
+odours within a single session (so capture-day no longer ≡ odour and LORO
+becomes truly honest), use a hotter heater profile (the 100 °C steps currently
+saturate out of range), and add repeats (lavender is only 3 runs).
 
 For reference, this is the exp-2 baseline confusion matrix (RandomForest,
-lowpass off, window=5) that motivated trying other algorithms in the first
-place:
+lowpass off, window=5) on the earlier **sorange-era** 3-class data — kept because
+it motivated trying other algorithms in the first place:
 
 ```
               predicted:
@@ -334,12 +352,6 @@ place:
   lemon:           5      737       16
   sorange:        266      51      321
 ```
-
-A baseline-relative feature variant (subtracting each run's own clean-air
-mean, on the theory that raw resistance carries session-to-session drift)
-was also tried early on and made `rf` accuracy *worse* (0.61 → 0.48), which
-rules out simple absolute-level drift as the root cause — see `train.py`'s
-`load_classification_data` docstring.
 
 ## What the real data actually looks like (read this before trusting labels)
 
@@ -419,12 +431,12 @@ why, in the order they were found:
    heater-wait encoding) but explains the warning printed at the top of
    `build_dataset.py`'s output.
 
-7. **Captured odours are `lemon`, `grapefruit`, `sorange`** — not
-   `plan.md`'s declared `lemon`/`grapefruit`/`lavender`. `build_dataset.py`
-   doesn't hard-code an odour set (it discovers odours from filenames) but
-   prints a warning about the mismatch. Confirm with whoever's driving
-   collection whether `sorange` (sweet orange?) is a deliberate substitute
-   for lavender or a placeholder/test capture before training on it.
+7. **Captured odours are `lemon`, `grapefruit`, `lavender`** — matching
+   `plan.md`. (An earlier round captured `sorange` (sweet orange) in lavender's
+   place; those sessions were re-collected as lavender.) `build_dataset.py`
+   doesn't hard-code an odour set — it discovers odours from filenames and warns
+   on any mismatch with `plan.md` — and that check now passes with no
+   substitution.
 
 ## Open parameters (plan explicitly leaves these for empirical tuning)
 
@@ -435,28 +447,32 @@ why, in the order they were found:
 | log-transform order | before filtering | Chosen empirically: the real decay/rise segments are close to linear in log-space (fits hit R² 0.96-1.0), which wouldn't hold filtering-then-logging raw resistance given the multi-order-of-magnitude swings between heater steps. |
 | Step-alignment (Stage 2c) | off (`align.JITTER_ABS_THRESHOLD_S = 0.3`s) | Measured real jitter is std ~0.05-0.09s against multi-second step spacings — confirmed negligible, not assumed. The spline path exists and is exercised for robustness but not currently triggered by any real run. |
 | Window size `N` | **3 cycles** (`windowing.DEFAULT_WINDOW`) | Swept 3/5/10/15: regressor R² is monotonically worse with larger windows (0.868/0.859/0.837/0.817) — the strength changes faster than a big window stays local to. 3 was the smallest tried and won; going smaller still is untested. |
-| Classifier algorithm | **logreg** (`--classifier-algo`; deployed detect model uses **svm**) | Swept rf/gb/svm/logreg/knn on the 9-run 3-class task: logistic regression won by a wide margin (0.746-0.755 vs rf's 0.581-0.611), plausibly because that task is closer to linearly separable in this feature space than tree ensembles can exploit with only ~700 examples/class. On the 4-class `detect` task, SVM won instead — the shipped model is the detect-SVM. |
+| Classifier algorithm | **svm** (`--classifier-algo`; the deployed detect default) | On the 4-class `detect` task SVM (rbf, `probability=True`) won and is shipped. The earlier 9-run 3-class plateau sweep of rf/gb/svm/logreg/knn was won instead by **logreg** by a wide margin (0.746-0.755 vs rf's 0.581-0.611) — that task is closer to linearly separable than tree ensembles can exploit with ~700 examples/class — so `logreg` is the right pick if you go back to `--classifier-phase-filter plateau`. |
 | Classifier features | **raw_gradient** (`--classifier-features`) | Swept raw / gradient / raw_gradient / temp_contrast: `raw_gradient` (the 10 log-R steps + their 9 step-to-step gradients — the temperature-sweep shape) won at 0.799 vs raw's 0.755, and near-eliminated lemon misclassification. Helps every classifier. `real_ml.py` reads the choice from `metadata.json` and applies the same transform live. |
+| Baseline-relative features | **on** (`--baseline-relative`; `--no-baseline-relative` to disable) | Subtract each (run,sensor)'s clean-air baseline before the feature transform (log R/R₀). The **drift fix**: absolute log-R encodes session/humidity/board, and with odour ≡ capture-day the raw-level model leaks (LORO 0.925) and collapses to one class on a live sensor at a different humidity; baseline-relative is drift-invariant (honest LORO 0.771, survives live). `real_ml.py` estimates the baseline live and subtracts it to match. |
 | Regressor algorithm | **rf** (`--regressor-algo`) | Swept rf/gb/ridge/svr/knn: `rf` stayed best (R²=0.859-0.872 vs next-best svr 0.799). Ridge's poor showing confirms the dynamics are genuinely nonlinear. |
 | Strength signal / label | mean log-resistance across all 10 steps; `y_conc` read linearly between the observed baseline (0) and plateau (1) levels | Simplification: averages across very different heater temperatures rather than picking one "best" step. Labels now come from the two observed stable levels (extrapolation-free); the per-segment exponential fit (R² 0.96-1.0) is still computed but is diagnostic-only. A per-step or best-step signal is worth trying if classification/regression accuracy plateaus. |
 | Rise phase included | yes | Plan calls this optional; included since it roughly doubles labelled decay-direction data and its fits are consistently the best (R² ~0.995-1.0). |
 | Purge phase | not separately detected | No real capture shows the post-decay curve re-stabilizing before file end, so there's nothing to detect yet — the whole post-plateau tail is treated as one continuous `decay` fit. Revisit if a future capture runs long enough to show it. |
 
-Full sweep: `experiments.csv` / `EXPERIMENTS.md` (25 runs — the 9-run
-algorithm/feature sweep in exps 1–23, then exps 24–25 that switched the deployed
-model to the 4-class detect-SVM + rise-anchored labels on the 12-run data). To
-go back to the original vanilla baseline
-(RandomForest/RandomForest, lowpass off, window=5) for comparison: `python
-build_dataset.py --no-lowpass --window 5` + `python train.py
---classifier-algo rf --regressor-algo rf`.
+Full sweep: `experiments.csv` / `EXPERIMENTS.md` (31 runs — the 9-run
+algorithm/feature sweep in exps 1–23, exps 24–25 that switched the deployed
+model to the 4-class detect-SVM + rise-anchored labels, then exps 30–31 that made
+it **baseline-relative** on the 15-run data). To go back to the original vanilla
+baseline (RandomForest/RandomForest, lowpass off, window=5) for comparison:
+`python build_dataset.py --no-lowpass --window 5` + `python train.py
+--no-baseline-relative --classifier-phase-filter plateau --classifier-algo rf
+--regressor-algo rf`.
 
 ## Known caveats
 
-- Few repeats per odour — 6 lemon (3 original + 3 longer-decay "v2"), 3
-  grapefruit, 3 sorange (12 runs total), all captured at a single nominal
-  concentration (0.6). `smell_ml.split` offers leave-one-run-out for a more
-  stable estimate than a single held-out split, per the plan's own caution
-  about this.
+- Few repeats per odour — 6 lemon (3 original + 3 longer-decay "v2"), 6
+  grapefruit (3 + 3 "v2"), 3 lavender ("v2") — 15 runs total, all captured at a
+  single nominal concentration (0.6). `smell_ml.split` offers leave-one-run-out
+  for a more stable estimate than a single held-out split, per the plan's own
+  caution about this. Because each odour was captured on its own day, even LORO
+  is slightly optimistic (capture-day ≡ odour); interleaving odours within a
+  session is the fix — see the deployed-classifier note on baseline-relative.
 - `sensor_id` in the output is the physical chip-select (1/3/5/7), not a
   0-indexed position — keep that in mind if you one-hot it.
 - Classification labels (`y_class`) are just the filename-parsed odour string

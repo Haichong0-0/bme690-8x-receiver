@@ -30,7 +30,7 @@ output prints the odour verdict and per-sensor MAE.
 
 | | `evaluate.py` | `testing/test_capture.py` |
 |---|---|---|
-| input | the 9 processed **training** runs | one **new** raw CSV |
+| input | the 15 processed **training** runs | one **new** raw CSV |
 | predictions | leave-one-run-out (each run held out) | the **deployed** model (trained on all data) |
 | purpose | honest CV estimate over training data | test generalisation to a genuinely unseen capture |
 
@@ -46,3 +46,10 @@ output prints the odour verdict and per-sensor MAE.
   MAE around the ~0.07 leave-one-run-out figure, not ~0.01.
 - Preprocessing is identical to training (it calls `preprocess.preprocess_dataframe`),
   so the "true" line here is directly comparable to the training diagnostics.
+- **Caveat — the odour verdict does not yet apply the baseline-relative
+  transform.** The deployed classifier is trained on baseline-relative features
+  (each session's clean-air level subtracted, log R/R₀), but this harness feeds
+  it the raw absolute plateau features, so its **odour** call is unreliable for
+  the current model — the strength (regressor) line is unaffected. Serving
+  (`Server/real_ml.py`) does apply the subtraction (it estimates the live
+  baseline); mirror that here before trusting the odour verdict.

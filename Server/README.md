@@ -238,22 +238,29 @@ pass `-v` for per-cycle detail.
 
 - **`real_ml.py`** — `RealEstimator`: loads the trained artifacts from
   `models/` and turns buffered cycles into an inference. The classifier is a
-  4-class **detect-mode SVM** over `{none, lemon, grapefruit, sorange}` — a
+  4-class **detect-mode SVM** over `{none, lemon, grapefruit, lavender}` — a
   dedicated clean-air **`none`** class plus the three odours trained across a
   concentration range, so it identifies an odour even at low concentration and
-  rejects clean air itself. It still runs on `raw_gradient` features (the 10
-  log-resistance steps plus their step-to-step gradients — the temperature-sweep
-  shape), read via `metadata.json`'s `classifier_features` so the live features
-  match training. `infer()` auto-detects the `none` class: it reports the best
-  **real** odour (never `none`) and uses P(that odour) as `odour_confidence`, so
-  clean-air or faint cycles come through with low confidence and the XR visual's
-  confidence gate hides them. The regressor is a RandomForest over a 3-cycle
-  window predicting 0→1 strength. The **strength gate** is now just a low
-  **0.15** backstop (`DEFAULT_STRENGTH_GATE_WITH_NONE`) when a `none`-class model
-  is loaded — the classifier does the primary no-odour detection now; a legacy
-  plateau-only classifier (no `none` class) still uses the old **0.6** gate, and
-  `strength_gate=None` (the default) auto-selects on the loaded model. On the
-  wire the odour is always one of `{lemon, grapefruit, sorange}` — `none` is a
+  rejects clean air itself. It runs on **baseline-relative `raw_gradient`**
+  features (the 10 log-resistance steps plus their step-to-step gradients — the
+  temperature-sweep shape — with each run's clean-air level subtracted, log
+  R/R₀), read via `metadata.json`'s `classifier_features` + `baseline_relative`
+  so the live features match training. **This is the drift fix:** absolute
+  resistance drifts with humidity/board/session, and the old raw-level model
+  latched onto that instead of the odour and collapsed to one class live;
+  baseline-relative cancels it. To subtract the baseline live, `RealEstimator`
+  **estimates each sensor's clean-air baseline** — accumulate cycles, skip 12
+  warmup, median the next 8, freeze — and won't classify a sensor until that
+  baseline is captured. `infer()` auto-detects the `none` class: it reports the
+  best **real** odour (never `none`) and uses P(that odour) as `odour_confidence`,
+  so clean-air or faint cycles come through with low confidence and the XR
+  visual's confidence gate hides them. The regressor is a RandomForest over a
+  3-cycle window predicting 0→1 strength. The **strength gate** is now vestigial
+  — the `none` class does the primary clean-air rejection — and both
+  `DEFAULT_STRENGTH_GATE_WITH_NONE` / `DEFAULT_STRENGTH_GATE` are currently **0**
+  (disabled for live testing; design backstops are 0.15 for a `none`-class model
+  and 0.6 for a legacy no-`none` one; `strength_gate=None` auto-selects). On the
+  wire the odour is always one of `{lemon, grapefruit, lavender}` — `none` is a
   host-side detail that only ever lowers confidence.
 - **`dummy_ml.py`** — the placeholder `Estimator` (`--dummy`), kept for
   transport testing without a model.
@@ -262,9 +269,10 @@ pass `-v` for per-cycle detail.
   `Server/` holds no training data — only the models, per the ML/Server
   boundary (see [`../CLAUDE.md`](../CLAUDE.md) and [`../ML/README.md`](../ML/README.md)).
 
-> Models are trained offline in [`../ML/`](../ML/) and copied here. To retrain
-> and redeploy the deployed detect-SVM classifier:
-> `python ../ML/train.py --classifier-phase-filter detect --classifier-algo svm`,
+> Models are trained offline in [`../ML/`](../ML/) and copied here. The deployed
+> detect-SVM + baseline-relative config is now `train.py`'s default, so retraining
+> and redeploying is just `python ../ML/train.py` (equivalently
+> `--classifier-phase-filter detect --classifier-algo svm --baseline-relative`),
 > then copy `ML/models/*` into `Server/models/`.
 
 ---
@@ -441,7 +449,7 @@ The viz auto-tails the newest `data/bme690_receiver_*.csv`. Confirm:
 | `bme690_viz.py` | Live matplotlib visualiser. Tails the CSV. |
 | `bmeconfig_to_profile.py` | Parser for `.bmeconfig` JSON; also a CLI inspector (`python bmeconfig_to_profile.py FILE.bmeconfig --print`). |
 | `ws_publisher.py` | Approach-A WebSocket server + publisher: runs the ML each tick, broadcasts the §3 packet to connected clients. |
-| `real_ml.py` | `RealEstimator` — loads `models/`, runs classify-then-regress with a strength gate. |
+| `real_ml.py` | `RealEstimator` — loads `models/`, runs classify-then-regress; estimates each sensor's clean-air baseline live for the baseline-relative classifier. |
 | `dummy_ml.py` | Placeholder `Estimator` for pure transport testing (`--dummy`). |
 | `models/` | Trained model artifacts (classifier/regressor + scalers + `metadata.json`), copied from `ML/models/`. |
 | `Sample.bmeconfig` | Example BME AI-Studio config — two heater profiles, grouped layout. |

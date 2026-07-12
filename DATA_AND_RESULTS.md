@@ -36,7 +36,8 @@ cp <bundle>/raw/*.csv ML/data/raw/
 python ML/build_dataset.py
 
 # 2. train + save the deployed models to ML/models/
-python ML/train.py --classifier-phase-filter detect --classifier-algo svm
+#    (detect + svm + baseline-relative is now the default; the flags below are explicit equivalents)
+python ML/train.py    # == --classifier-phase-filter detect --classifier-algo svm --baseline-relative
 
 # 3. deploy the models to the live server
 cp ML/models/* Server/models/
@@ -50,10 +51,15 @@ python ML/testing/test_capture.py ML/data/raw/<some_capture>.csv
 ```
 
 Step 2 produces the deployed models: a 4-class `{none, lemon, grapefruit,
-sorange}` SVM classifier (leave-one-run-out accuracy **0.837**; clean-air `none`
-recall 97%) and a RandomForest strength regressor (LORO **R² 0.891**). Training
-is seeded (`--seed 0`, the default), so a rerun reproduces the same models and
-metrics; each run also appends a row to `ML/experiments.csv` / `EXPERIMENTS.md`.
+lavender}` **baseline-relative** SVM classifier (drift-robust leave-one-run-out
+accuracy **0.771**; clean-air `none` recall 100%, odour-vs-odour ~0.6) and a
+RandomForest strength regressor (LORO **R² 0.891**, MAE 0.083). Baseline-relative
+features (each session's clean-air level subtracted, log R/R₀) are what let the
+classifier survive live sensor drift — a raw-level model scores a higher-looking
+0.925 offline but collapses to one class on a live sensor at a different humidity.
+Training is seeded (`--seed 0`, the default), so a rerun reproduces the same
+models and metrics; each run also appends a row to `ML/experiments.csv` /
+`EXPERIMENTS.md`.
 
 For the stage-by-stage preprocessing detail and how to read the figures, see
 [`ML/PREPROCESSING.md`](ML/PREPROCESSING.md); for the model-selection history,

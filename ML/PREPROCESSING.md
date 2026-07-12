@@ -7,8 +7,8 @@ model-selection experiments that consume the output see
 [`EXPERIMENTS.md`](EXPERIMENTS.md).
 
 Everything here was built and corrected against the **real** captures in
-`data/raw/` (12 runs: grapefruit and sorange 3 each, lemon 6 — the 3 originals
-plus 3 longer-decay "v2" re-captures), not against the
+`data/raw/` (15 runs: lemon 6, grapefruit 6, lavender 3 — each a mix of the
+originals plus longer-decay "v2" re-captures), not against the
 original plan's assumptions. Where the two diverge, the deviation is called
 out.
 
@@ -77,8 +77,9 @@ An **optional variant tag** after the concentration — e.g.
 (→ `lemon_20260709_110002_v2`) while still parsing to the same `odour`, which
 keeps the newer longer-decay lemon re-captures distinct from the originals.
 Odours are **discovered from filenames**, not hard-coded — which is how the
-pipeline noticed the real captures contain `sorange`, not the plan's
-`lavender`.
+pipeline flagged an earlier round that contained `sorange` instead of the plan's
+`lavender`; those sessions were re-captured as lavender, so the current 15-run
+set matches the plan.
 
 ---
 
@@ -238,15 +239,15 @@ region is clean-air baseline (`y_conc = 0.0`) and the LOW-resistance region is
 peak exposure (`y_conc = 1.0`), because MOx resistance *drops* under reducing
 VOCs.
 
-Cycle counts by detected phase across all 12 runs (`meta.json`):
+Cycle counts by detected phase across all 15 runs (`meta.json`; 15 592 total):
 
 | phase | cycles | y_conc |
 |---|--:|---|
-| baseline | 2 401 | 0.0 (level anchor) |
-| rise | 721 | 0→1 (level read-off) |
-| plateau | 2 786 | 1.0 (level anchor) |
-| decay | 3 737 | 1→0 (level read-off) |
-| warmup | 1 140 | *excluded* (NaN) |
+| baseline | 3 150 | 0.0 (level anchor) |
+| rise | 778 | 0→1 (level read-off) |
+| plateau | 3 616 | 1.0 (level anchor) |
+| decay | 6 784 | 1→0 (level read-off) |
+| warmup | 1 264 | *excluded* (NaN) |
 
 ### The strength label — read off the levels, not the fit
 
@@ -273,9 +274,10 @@ detectable baseline or plateau — are left `NaN` and excluded downstream.
 The exponential is **still computed, but only for diagnostics** now — its
 `tau_s` (recovery time constant), `r_squared`, and the `asymptote_unreliable`
 flag characterise each segment without setting any label. Those diagnostic fits
-are excellent: mean **R² = 0.992**, zero below 0.8, across the 92 fitted
-segments (of 12 runs × 4 sensors × 2 = 96; 4 rise segments in one v2 run were
-too short to fit). Example from `run_fits.csv` (lemon, sensor 1):
+are excellent: mean **R² = 0.993**, zero below 0.8, across all **120 fitted
+segments** (15 runs × 4 sensors × 2 = 120 — every rise/decay segment fit this
+time; 9 carry an `asymptote_unreliable` flag). Example from `run_fits.csv`
+(lemon, sensor 1):
 
 ```
 phase   r_squared   tau_s     n_cycles   duration_s   asymptote_unreliable
@@ -364,9 +366,9 @@ Written to `data/processed/` (regenerable, git-ignored):
 
 | File | Shape / rows | Contents |
 |---|---|---|
-| `cycle_dataset.csv` | 10 785 rows | one row per (run, sensor, cycle): `run_id, odour, sensor_id, cycle_index, cycle_timestamp, phase, y_conc, step_0…step_9`. Classification-ready (single cycles); also human-inspectable. |
-| `window_dataset.npz` | 9 549 windows | regression-ready arrays: `X_window` `(9549, 3, 10)`, `y_conc`, `y_class`, `run_id`, `sensor_id`, `trend_slope`, `trend_diff_last`. |
-| `run_fits.csv` | 96 rows | one row per (run, sensor, rise/decay segment): the now-diagnostic-only exp-fit `tau_s, r_squared, n_cycles, duration_s, asymptote_unreliable`, plus per-run `fs_hz`, `cutoff_hz`, imputation count. |
+| `cycle_dataset.csv` | 15 592 rows | one row per (run, sensor, cycle): `run_id, odour, sensor_id, cycle_index, cycle_timestamp, phase, y_conc, step_0…step_9`. Classification-ready (single cycles); also human-inspectable. |
+| `window_dataset.npz` | 14 208 windows | regression-ready arrays: `X_window` `(14208, 3, 10)`, `y_conc`, `y_class`, `run_id`, `sensor_id`, `trend_slope`, `trend_diff_last`. |
+| `run_fits.csv` | 120 rows | one row per (run, sensor, rise/decay segment): the now-diagnostic-only exp-fit `tau_s, r_squared, n_cycles, duration_s, asymptote_unreliable`, plus per-run `fs_hz`, `cutoff_hz`, imputation count. |
 | `meta.json` | — | pipeline summary: odours discovered, cycle counts by phase, mean R², low-R²/unreliable-fit counts, whether lowpass/alignment were applied. |
 | `data/diagnostics/*.png` | 48 plots | one per (run, sensor): cleaned curve colour-coded by detected phase with the `y_conc` overlay — the plan's mandated "validate the fit visually before trusting it." |
 
@@ -508,5 +510,5 @@ Putting the stages together for the first cycle of sensor 1 in the lemon run:
 6. **4** once the run reaches labelled cycles, this sensor's stream is sliced
    into 3-cycle windows for regression.
 
-Multiply by 4 sensors × 12 runs and you get the 10 785 cycles / 9 549 windows in
+Multiply by 4 sensors × 15 runs and you get the 15 592 cycles / 14 208 windows in
 `data/processed/`.

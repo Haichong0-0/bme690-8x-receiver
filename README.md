@@ -68,7 +68,7 @@ around this; it's deliberately tiny and stable.
 | Field | Type | Meaning |
 |---|---|---|
 | `timestamp` | float | Host epoch seconds when inference ran |
-| `odour` | string | `lemon` / `grapefruit` / `sorange` (see below) |
+| `odour` | string | `lemon` / `grapefruit` / `lavender` (see below) |
 | `odour_confidence` | float 0–1 | Classifier confidence; the client can ignore low-confidence frames |
 | `intensity` | float 0–1 | Normalised relative strength → drives the visual's magnitude |
 | `seq` | int | Monotonic counter; lets the receiver drop stale/out-of-order frames |
@@ -80,22 +80,20 @@ The Python side emits it (`Server/ws_publisher.py`), the C# side parses it
 
 ## The odours
 
-The models are trained on **lemon, grapefruit, sorange** (sweet orange).
+The models are trained on **lemon, grapefruit, lavender** — matching
+[`plan.md`](plan.md). (An earlier capture round used `sorange` (sweet orange) in
+lavender's place; those sessions were re-collected as lavender, so the pipeline's
+odour-vs-plan check now passes with no substitution.)
 
-> `plan.md` originally declared lemon / grapefruit / **lavender**. The third
-> odour actually captured is `sorange`, not lavender — the pipeline discovers
-> odours from capture filenames rather than assuming a fixed set, and flags the
-> mismatch on every build. Confirm with whoever drives collection whether
-> `sorange` is a deliberate substitute before relying on it. `lemon` is cleanly
-> separable; `grapefruit`↔`sorange` are the residual confusion (shared citrus
-> terpenes) — see [`ML/README.md`](ML/README.md).
-
-All captures so far are at a single nominal concentration (0.6) — 12 runs in all
-(6 lemon, 3 grapefruit, 3 sorange). The classifier now carries a clean-air
+All captures so far are at a single nominal concentration (0.6) — **15 runs** in
+all (6 lemon, 6 grapefruit, 3 lavender); the later "v2" runs are held well past
+exposure to capture the full decay tail. The classifier carries a clean-air
 **`none`** class (handled host-side, never sent on the wire), so it flags an
-odour even at low concentration yet correctly rejects clean air ~97% of the time,
-where the earlier model — having no "no-odour" class — always mislabelled clean
-air as an odour. See the discussion in `ML/`.
+odour even at low concentration yet correctly rejects clean air ~100% of the
+time, where the earlier model — having no "no-odour" class — always mislabelled
+clean air as an odour. `lemon` is the residual confusion sink (both grapefruit
+and lavender leak into it); odour-vs-odour discrimination is ~0.6. See the
+discussion in [`ML/README.md`](ML/README.md).
 
 ---
 
@@ -175,9 +173,12 @@ and/or trained models you supply.
 ## Status
 
 Built and working: end-to-end capture → CSV, the offline ML pipeline + trained
-models (classifier LORO accuracy 0.837, regressor R² 0.891), the live
-classify-then-regress publisher, and the HoloLens client (verified on-device
-over local Wi-Fi, Approach A). Known gaps: the live sensor stream reaches the
+models (drift-robust classifier LORO accuracy 0.771, regressor R² 0.891), the
+live classify-then-regress publisher, and the HoloLens client (verified on-device
+over local Wi-Fi, Approach A). The classifier uses **baseline-relative** features
+(each session's clean-air level subtracted) so it survives live sensor drift; the
+raw-level model scored a higher-looking 0.925 offline but collapsed to a single
+class on a live sensor at a different humidity. Known gaps: the live sensor stream reaches the
 publisher via CSV tail rather than a direct in-process feed; **Approach B** (the
 remote `wss://` relay) is designed but unbuilt; and the dataset covers only a
 single nominal concentration (0.6), so behaviour across concentration levels is
