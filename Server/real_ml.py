@@ -173,6 +173,7 @@ class RealEstimator(Estimator):
         self._inference_active = False
         self._baseline_accum: Dict[int, list] = {}      # sensor_id -> early clean-air cycles
         self._baseline_vec: Dict[int, np.ndarray] = {}  # sensor_id -> frozen baseline vector
+        self._last_baseline_report = ""                 # throttles the warming-up heartbeat
 
     def push_cycle(self, sensor_id: int, step_log_resistance: np.ndarray) -> None:
         """Feed one completed heater-profile cycle's log-resistance vector
@@ -263,7 +264,8 @@ class RealEstimator(Estimator):
                 print("# real_ml: no sensors ready — reporting idle "
                       "(odour_confidence=0, intensity=0)", file=sys.stderr)
                 self._inference_active = False
-            return Inference(odour=ODOURS[0], odour_confidence=0.0, intensity=0.0)
+            return Inference(odour=ODOURS[0], odour_confidence=0.0, intensity=0.0,
+                             status="idle")
 
         if not self._inference_active:
             if self.verbose:  # routine positive transition — verbose only
@@ -283,10 +285,14 @@ class RealEstimator(Estimator):
             scaled = self.classifier_scaler.transform(latest)
             clf_probs.append(self.classifier.predict_proba(scaled)[0])
 
+        status = "ok"
         if not clf_probs:
             # baseline-relative model, no sensor baselined yet (still inside the
-            # clean-air reference window) -- cannot classify, report no odour.
+            # clean-air reference window) -- cannot classify. Report a placeholder
+            # and flag it as warming up so the publisher doesn't log a bogus odour.
             odour, confidence = ODOURS[0], 0.0
+            status = "warming_up"
+            self._log_baseline_progress()
         else:
             mean_proba = np.mean(clf_probs, axis=0)
             classes = self.classifier.classes_
@@ -319,7 +325,26 @@ class RealEstimator(Estimator):
             odour=odour,
             odour_confidence=round(confidence, 4),
             intensity=round(intensity, 4),
+            status=status,
         )
+
+    def _log_baseline_progress(self) -> None:
+        """While a baseline-relative model is still learning each sensor's
+        clean-air reference, print a throttled heartbeat with per-sensor progress
+        so the placeholder ``ODOURS[0]`` / confidence 0 isn't mistaken for a real
+        reading. Only prints when the summary changes (≈ once per new cycle)."""
+        need = N_WARMUP_SKIP + N_BASELINE_CYCLES
+        parts = [
+            f"{sid}:ready" if sid in self._baseline_vec
+            else f"{sid}:{len(self._baseline_accum.get(sid, []))}/{need}"
+            for sid in sorted(self._buffers)
+        ]
+        summary = " ".join(parts)
+        if summary != self._last_baseline_report:
+            self._last_baseline_report = summary
+            print(f"# real_ml: WARMING UP — capturing clean-air baseline "
+                  f"[{summary}]; not classifying yet. Keep the sensor in clean air "
+                  f"until every sensor reads 'ready' (~3 min).", file=sys.stderr)
 
 
 def _extract_cycles(df: pd.DataFrame, sensor_index: int) -> List[tuple]:

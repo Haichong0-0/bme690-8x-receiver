@@ -133,16 +133,20 @@ def make_estimator(use_dummy: bool = False, verbose: bool = False) -> Estimator:
     return RealEstimator(verbose=verbose)
 
 
-def build_packet(est: Estimator, seq: int, t: float) -> dict:
-    """Assemble one plan.md §3 packet from an inference."""
+def build_packet(est: Estimator, seq: int, t: float) -> tuple[dict, str]:
+    """Assemble one plan.md §3 packet from an inference. Returns the wire packet
+    plus the host-side ``status`` ("ok"/"warming_up"/"idle") — which is NOT part
+    of the packet; the publisher uses it only to log a clear heartbeat instead of
+    a placeholder odour."""
     inf = est.infer(t=t)
-    return {
+    packet = {
         "timestamp": round(time.time(), 3),
         "odour": inf.odour,
         "odour_confidence": inf.odour_confidence,
         "intensity": inf.intensity,
         "seq": seq,
     }
+    return packet, getattr(inf, "status", "ok")
 
 
 STATUS_LOG_INTERVAL_S = 1.0        # heartbeat while producing real (non-idle) readings
@@ -186,11 +190,21 @@ class Publisher:
             print(f"# client disconnected: {peer}  ({len(self.clients)} total)",
                   file=sys.stderr)
 
-    def _maybe_log_status(self, packet: dict, now: float) -> None:
+    def _maybe_log_status(self, packet: dict, now: float, status: str = "ok") -> None:
         """Status line at most once/sec while producing real readings (once
         per 10s while idle — see IDLE_STATUS_LOG_INTERVAL_S), plus
         immediately whenever the classified odour changes — that's the
-        "interesting" event, not every tick. --verbose logs every packet."""
+        "interesting" event, not every tick. --verbose logs every packet.
+
+        When ``status`` isn't "ok" the odour/confidence in the packet are
+        placeholders (the model is warming up its clean-air baseline, or no
+        sensor is delivering fresh cycles), NOT a real reading — so suppress the
+        odour line here. real_ml.py already prints a clear per-sensor heartbeat
+        for that state; logging "odour=lemon confidence=0.00" too would just look
+        like a bogus lemon detection."""
+        if status != "ok":
+            self._last_logged_odour = status  # force an odour-change log on recovery
+            return
         odour_changed = packet["odour"] != self._last_logged_odour
         interval = IDLE_STATUS_LOG_INTERVAL_S if packet["odour_confidence"] == 0 else STATUS_LOG_INTERVAL_S
         due = (now - self._last_status_log) >= interval
@@ -214,7 +228,7 @@ class Publisher:
         while True:
             now = time.monotonic()
             try:
-                packet = build_packet(self.estimator, self.seq, t=now - start)
+                packet, status = build_packet(self.estimator, self.seq, t=now - start)
                 self.seq += 1
                 if self.clients:
                     msg = json.dumps(packet)
@@ -222,7 +236,7 @@ class Publisher:
                     # and swallows per-client send errors internally — a client
                     # dropping mid-send can't break this tick.
                     websockets.broadcast(self.clients, msg)
-                self._maybe_log_status(packet, now)
+                self._maybe_log_status(packet, now, status)
             except Exception as e:
                 # A bad tick shouldn't take the whole server down; skip it.
                 print(f"# broadcast_loop: skipping tick, error: {e}", file=sys.stderr)
@@ -355,7 +369,8 @@ def main() -> int:
     estimator = make_estimator(use_dummy=(mode == "dummy"), verbose=args.verbose)
 
     if args.once:
-        print(json.dumps(build_packet(estimator, seq=0, t=0.0)))
+        packet, _ = build_packet(estimator, seq=0, t=0.0)
+        print(json.dumps(packet))
         return 0
 
     replay_sensor_indices = None

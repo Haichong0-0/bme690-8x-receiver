@@ -32,6 +32,13 @@ class Inference:
     odour: str
     odour_confidence: float  # 0..1
     intensity: float  # 0..1
+    # Host-side only — NOT part of the plan.md §3 wire packet. Lets the publisher
+    # log the real state instead of a placeholder odour:
+    #   "ok"          — a genuine classification (odour/confidence are real)
+    #   "warming_up"  — still capturing the live clean-air baseline, so odour is
+    #                   a placeholder (ODOURS[0]) and confidence is 0
+    #   "idle"        — no sensor delivering fresh cycles
+    status: str = "ok"
 
 
 class Estimator:
