@@ -97,11 +97,16 @@ firmware. Streams CSV matching BME AI-Studio's `.bmerawdata` schema.
   `RealEstimator` **auto-detects the "none" class**: for the deployed detect
   model it reports the best *real* odour (never "none") with P(that odour) as
   `odour_confidence`. Because the model is baseline-relative it **estimates the
-  live clean-air baseline per sensor** — accumulate cycles, skip `N_WARMUP_SKIP`
-  (12) warmup, median the next `N_BASELINE_CYCLES` (8), freeze — and subtracts it
-  before classifying (a sensor isn't classified until its baseline is captured);
-  this is what makes the classifier survive the live drift the old raw-level
-  model died on. The **strength gate** is now vestigial: the `none` class does
+  live clean-air baseline per sensor** — accumulate cycles, discard a minimum
+  warmup (`N_WARMUP_SKIP` 12), then freeze the per-step median of the last
+  `N_BASELINE_CYCLES` (8) **once the clean-air level has flattened** (adaptive:
+  the last 8 cycles' mean log-R drifts ≤ `BASELINE_STABLE_EPS` 0.05, ~5%, else
+  keep waiting up to `N_BASELINE_MAX_CYCLES` 90 then force + warn) — and subtracts
+  it before classifying (a sensor isn't classified until its baseline is
+  captured). The stability gate matters because a cold first-run-of-day keeps
+  climbing well past 3 min; freezing on a fixed count would bake a too-low
+  baseline in. This is what makes the classifier survive the live drift the old
+  raw-level model died on. The **strength gate** is now vestigial: the `none` class does
   the clean-air rejection it used to stand in for, so both gates are currently
   **0** (`DEFAULT_STRENGTH_GATE_WITH_NONE` / `DEFAULT_STRENGTH_GATE`, disabled
   for live testing; the design backstop for a `none`-class model is 0.15, and

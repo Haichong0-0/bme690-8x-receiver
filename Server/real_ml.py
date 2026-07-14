@@ -97,13 +97,34 @@ DEFAULT_STRENGTH_GATE = 0
 DEFAULT_STRENGTH_GATE_WITH_NONE = 0
 # For a baseline-relative classifier (metadata "baseline_relative": true): the
 # live clean-air baseline vector is estimated at startup, then frozen. The
-# sensor's cold-start warmup RISES for ~100s before the clean-air level settles,
-# so skip that transient (N_WARMUP_SKIP cycles) and then median the next
-# N_BASELINE_CYCLES stable cycles -- matching training, where the baseline vector
-# is the post-warmup "baseline" phase, not the warmup. Cycles land every ~8-11s,
-# so this is ~3 min: keep the sensor in clean air that long at startup.
-N_WARMUP_SKIP = 12
-N_BASELINE_CYCLES = 8
+# sensor's cold-start warmup RISES before the clean-air level settles -- and on
+# the first run of the day it takes much longer than on later runs -- so a fixed
+# wait is unsafe: freeze too early and the baseline is captured while resistance
+# is still climbing (R0 too low, throwing off every later reading). Instead the
+# capture is ADAPTIVE: discard a minimum warmup (N_WARMUP_SKIP), then keep
+# sampling until the clean-air level has actually FLATTENED -- the last
+# N_BASELINE_CYCLES cycles' mean log-resistance drifts by <= BASELINE_STABLE_EPS
+# -- and only then freeze their median (matching training, whose baseline is the
+# settled post-warmup "baseline" phase). A warm sensor settles by ~20 cycles
+# (~3 min); a cold first-run waits as long as it needs, up to N_BASELINE_MAX_CYCLES
+# (then it freezes anyway and warns). Keep the sensor in clean air until every
+# sensor reports its baseline captured.
+N_WARMUP_SKIP = 12            # minimum cold-start cycles discarded before trusting clean air
+N_BASELINE_CYCLES = 8         # cycles medianed into the baseline; also the stability window
+BASELINE_STABLE_EPS = 0.05    # nat-log peak-to-peak over the window below which it's "settled"
+                              # (~5% resistance drift across ~80s of clean air)
+N_BASELINE_MAX_CYCLES = 90    # hard cap (~15 min): freeze anyway + warn if it never settles
+
+
+def _baseline_window_drift(acc: list) -> Optional[float]:
+    """Peak-to-peak of the last N_BASELINE_CYCLES cycles' mean log-resistance
+    (None until enough cycles exist). Small drift = the clean-air level has
+    stopped climbing, i.e. the sensor has warmed up and the baseline is safe to
+    freeze. Gates adaptive baseline capture (see the constants above)."""
+    if len(acc) < N_BASELINE_CYCLES:
+        return None
+    means = [float(np.mean(v)) for v in acc[-N_BASELINE_CYCLES:]]
+    return max(means) - min(means)
 
 
 def hp354_sensor_indices(bmeconfig_path: Path = DEFAULT_BMECONFIG) -> List[int]:
@@ -188,19 +209,32 @@ class RealEstimator(Estimator):
         buf.append(vec)
         self._last_push[sensor_id] = time.monotonic()
         if self.baseline_relative and sensor_id not in self._baseline_vec:
-            # Skip the cold-start warmup rise, then median the next stable
-            # clean-air cycles as this sensor's baseline (matches training, which
-            # uses the post-warmup 'baseline' phase, not the transient). Until
-            # it's frozen the sensor can't be classified (infer() skips it).
+            # Adaptive capture: discard a minimum warmup, then freeze the median
+            # of the last N_BASELINE_CYCLES only once the clean-air level has
+            # FLATTENED (drift <= BASELINE_STABLE_EPS) -- so a cold first-run that
+            # is still climbing waits instead of freezing a too-low baseline. A
+            # hard cap forces capture (with a warning) if it never settles. Until
+            # frozen the sensor can't be classified (infer() skips it).
             acc = self._baseline_accum.setdefault(sensor_id, [])
             acc.append(vec)
-            if len(acc) >= N_WARMUP_SKIP + N_BASELINE_CYCLES:
+            drift = _baseline_window_drift(acc)
+            enough = len(acc) >= N_WARMUP_SKIP + N_BASELINE_CYCLES
+            settled = drift is not None and drift <= BASELINE_STABLE_EPS
+            capped = len(acc) >= N_BASELINE_MAX_CYCLES
+            if (enough and settled) or capped:
+                n = len(acc)
                 self._baseline_vec[sensor_id] = np.median(
-                    np.stack(acc[N_WARMUP_SKIP:]), axis=0).astype(np.float32)
+                    np.stack(acc[-N_BASELINE_CYCLES:]), axis=0).astype(np.float32)
                 self._baseline_accum.pop(sensor_id, None)
-                print(f"# real_ml: sensor {sensor_id} clean-air baseline captured "
-                      f"(skipped {N_WARMUP_SKIP} warmup, {N_BASELINE_CYCLES} cycles) "
-                      f"— now classifiable", file=sys.stderr)
+                if settled:
+                    print(f"# real_ml: sensor {sensor_id} clean-air baseline captured "
+                          f"after {n} cycles (settled: drift {drift:.3f} <= "
+                          f"{BASELINE_STABLE_EPS}) — now classifiable", file=sys.stderr)
+                else:
+                    print(f"# real_ml: WARN sensor {sensor_id} baseline FORCED after "
+                          f"{n} cycles — clean-air level never settled (drift "
+                          f"{drift:.3f} > {BASELINE_STABLE_EPS}); sensor likely needs "
+                          f"more burn-in, readings may be off", file=sys.stderr)
         if self.verbose:
             print(f"# real_ml: sensor {sensor_id} cycle buffered ({len(buf)}/{self.window})  "
                   f"mean_log_r={float(vec.mean()):.3f}  range=[{float(vec.min()):.3f}, "
@@ -331,20 +365,25 @@ class RealEstimator(Estimator):
     def _log_baseline_progress(self) -> None:
         """While a baseline-relative model is still learning each sensor's
         clean-air reference, print a throttled heartbeat with per-sensor progress
-        so the placeholder ``ODOURS[0]`` / confidence 0 isn't mistaken for a real
-        reading. Only prints when the summary changes (≈ once per new cycle)."""
-        need = N_WARMUP_SKIP + N_BASELINE_CYCLES
-        parts = [
-            f"{sid}:ready" if sid in self._baseline_vec
-            else f"{sid}:{len(self._baseline_accum.get(sid, []))}/{need}"
-            for sid in sorted(self._buffers)
-        ]
+        (cycle count + how flat the level is) so the placeholder ``ODOURS[0]`` /
+        confidence 0 isn't mistaken for a real reading, and so you can watch the
+        drift fall toward the freeze threshold. Only prints when the summary
+        changes (≈ once per new cycle)."""
+        parts = []
+        for sid in sorted(self._buffers):
+            if sid in self._baseline_vec:
+                parts.append(f"{sid}:ready")
+            else:
+                acc = self._baseline_accum.get(sid, [])
+                drift = _baseline_window_drift(acc)
+                d = f"{drift:.3f}" if drift is not None else "—"
+                parts.append(f"{sid}:{len(acc)}cyc drift={d}")
         summary = " ".join(parts)
         if summary != self._last_baseline_report:
             self._last_baseline_report = summary
             print(f"# real_ml: WARMING UP — capturing clean-air baseline "
-                  f"[{summary}]; not classifying yet. Keep the sensor in clean air "
-                  f"until every sensor reads 'ready' (~3 min).", file=sys.stderr)
+                  f"[{summary}]; frozen once drift <= {BASELINE_STABLE_EPS}. "
+                  f"Keep the sensor in clean air.", file=sys.stderr)
 
 
 def _extract_cycles(df: pd.DataFrame, sensor_index: int) -> List[tuple]:

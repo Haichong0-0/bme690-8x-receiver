@@ -249,9 +249,12 @@ pass `-v` for per-cycle detail.
   resistance drifts with humidity/board/session, and the old raw-level model
   latched onto that instead of the odour and collapsed to one class live;
   baseline-relative cancels it. To subtract the baseline live, `RealEstimator`
-  **estimates each sensor's clean-air baseline** — accumulate cycles, skip 12
-  warmup, median the next 8, freeze — and won't classify a sensor until that
-  baseline is captured. `infer()` auto-detects the `none` class: it reports the
+  **estimates each sensor's clean-air baseline** — discard a minimum warmup, then
+  freeze the per-step median of the last 8 cycles **once the level has flattened**
+  (adaptive: it waits until the last 8 cycles' mean log-R drifts ≤ 5%, so a cold
+  first-run-of-day that's still climbing doesn't freeze a too-low baseline; a hard
+  cap forces capture with a warning if it never settles) — and won't classify a
+  sensor until that baseline is captured. `infer()` auto-detects the `none` class: it reports the
   best **real** odour (never `none`) and uses P(that odour) as `odour_confidence`,
   so clean-air or faint cycles come through with low confidence and the XR
   visual's confidence gate hides them. The regressor is a RandomForest over a
