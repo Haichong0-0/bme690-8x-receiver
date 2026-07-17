@@ -1,9 +1,9 @@
 {
   "dependencies": {
     "com.microsoft.mixedreality.openxr": {
-      "version": "file:MixedReality/com.microsoft.mixedreality.openxr-1.11.2.tgz",
+      "version": "file:com.microsoft.mixedreality.openxr",
       "depth": 0,
-      "source": "local-tarball",
+      "source": "embedded",
       "dependencies": {
         "com.unity.xr.arfoundation": "4.1.7",
         "com.unity.xr.management": "4.2.0",
@@ -262,7 +262,7 @@
       "url": "https://packages.unity.com"
     },
     "com.unity.xr.arfoundation": {
-      "version": "6.4.3",
+      "version": "6.3.5",
       "depth": 0,
       "source": "registry",
       "dependencies": {
