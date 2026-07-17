@@ -1,3 +1,4 @@
+using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -28,7 +29,7 @@ public class PacketDebugHud : MonoBehaviour
     public Vector2 viewOffset = new Vector2(-0.35f, 0.18f);
     public Vector2 panelSizeMetres = new Vector2(0.5f, 0.3f);
 
-    private Text _text;
+    private TMP_Text _text;
 
     private void Awake()
     {
@@ -66,11 +67,22 @@ public class PacketDebugHud : MonoBehaviour
 
         var textGO = new GameObject("Text");
         textGO.transform.SetParent(panelGO.transform, false);
-        _text = textGO.AddComponent<Text>();
-        _text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-        _text.fontSize = 22;
-        _text.alignment = TextAnchor.UpperLeft;
-        _text.color = Color.white;
+        // TextMeshPro renders from a signed-distance-field atlas, so text stays crisp
+        // at any magnification (HoloLens optics or a zoomed Game view) with no
+        // dynamicPixelsPerUnit trick. It uses TMP's default font asset, which needs
+        // TMP Essentials imported (Window > TextMeshPro > Import TMP Essential
+        // Resources) — without them the default font is null and text renders blank,
+        // so warn loudly rather than fail silently.
+        var tmp = textGO.AddComponent<TextMeshProUGUI>();
+        tmp.fontSize = 22;
+        tmp.alignment = TextAlignmentOptions.TopLeft;
+        tmp.color = Color.white;
+        tmp.textWrappingMode = TextWrappingModes.NoWrap;   // keep each aligned column line intact
+        tmp.richText = false;             // packet text is literal — no markup
+        _text = tmp;
+        if (tmp.font == null)
+            Debug.LogError("[PacketDebugHud] TextMeshPro has no font asset — run " +
+                "Window > TextMeshPro > Import TMP Essential Resources, then re-enter Play.");
         var textRt = textGO.GetComponent<RectTransform>();
         textRt.anchorMin = Vector2.zero;
         textRt.anchorMax = Vector2.one;
